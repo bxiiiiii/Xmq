@@ -1,4 +1,4 @@
-package zookeeper
+package server
 
 import (
 	"Xmq/logger"
@@ -15,10 +15,16 @@ var (
 	acls        = zk.WorldACL(zk.PermAll)
 )
 
-var zkc *zk.Conn
+var sdClient SdClient
+
+type SdClient struct {
+	brokerRoot string
+	topicRoot  string
+	conn       *zk.Conn
+}
 
 func init() {
-	zkc, _, err := zk.Connect(hosts, time.Second * 5)
+	zkc, _, err := zk.Connect(hosts, time.Second*5)
 	if err != nil {
 		logger.Errorf("connect zk failed: %v", err)
 	}

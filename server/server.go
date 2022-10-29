@@ -12,6 +12,7 @@ type serverInfo struct {
 type Server struct {
 	info    serverInfo
 	running bool
+	sl *sublist
 }
 
 func New() *Server {
