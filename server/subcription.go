@@ -1,7 +1,8 @@
 package server
 
 import (
-	"Xml/logger"
+	"Xmq/logger"
+	"container/list"
 	"sync"
 )
 
@@ -12,7 +13,7 @@ type subcription struct {
 	clients map[string]*client
 	topic   topic
 	offset  uint64
-	
+	clist   *list.List
 }
 
 type sublist struct {
@@ -20,9 +21,15 @@ type sublist struct {
 	s  map[string]*subcription
 }
 
+func NewSublist() *sublist {
+	s := make(map[string]*subcription)
+	return &sublist{s: s}
+}
+
 func NewSubcription() *subcription {
 	c := make(map[string]*client)
-	return &subcription{clients: c}
+	l := list.New().Init()
+	return &subcription{clients: c, clist: l}
 }
 
 func (s *sublist) insertORupdate(sub *subcription) {
@@ -81,14 +88,15 @@ func (s *subcription) deliverMsg(msgh []byte, msg []byte) {
 			v.mu.Unlock()
 		}
 	case Shared:
-		for _, v := range s.clients {
-			v.mu.Lock()
-			v.bw.Write(msgh)
-			v.bw.Write(msg)
-			v.bw.WriteString("\r\n")
-			v.bw.Flush()
-			v.mu.Unlock()
-		}
+		
+		// for _, v := range s.clients {
+		// 	v.mu.Lock()
+		// 	v.bw.Write(msgh)
+		// 	v.bw.Write(msg)
+		// 	v.bw.WriteString("\r\n")
+		// 	v.bw.Flush()
+		// 	v.mu.Unlock()
+		// }
 	case Key_Shared:
 		//TODO
 	}

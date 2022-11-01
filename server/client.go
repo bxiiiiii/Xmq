@@ -15,7 +15,7 @@ type client struct {
 	name   string
 	conn   net.Conn
 	srv    *Server
-	broker *broker
+	// broker *broker
 	cstats
 	praseState
 	bw *bufio.Writer
@@ -106,7 +106,7 @@ func (c *client) processSub(arg []byte) error {
 		return logger.Errorf("num of args :%v", len(args))
 	}
 	if c.srv != nil {
-		c.srv.sl.insertORupdate(sub)
+		c.srv.Sl.insertORupdate(sub)
 	}
 	return nil
 }
@@ -124,7 +124,7 @@ func (c *client) processUnsub(arg []byte) error {
 	default:
 		return logger.Errorf("num of args :%v", len(args))
 	}
-	return c.srv.sl.delete(sub)
+	return c.srv.Sl.delete(sub)
 }
 
 func (c *client) processMsg(msg []byte) {
@@ -140,7 +140,7 @@ func (c *client) processMsg(msg []byte) {
 	msgh = append(msgh, ' ')
 	ms := len(msgh)
 
-	subs := c.srv.sl.getSuber(c.pa.topic)
+	subs := c.srv.Sl.getSuber(c.pa.topic)
 	if len(subs) <= 0 {
 		return
 	}
@@ -170,6 +170,10 @@ func (c *client) msgHeader(msgh []byte, sub *subcription) []byte {
 	msgh = append(msgh, c.pa.szb...)
 	msgh = append(msgh, "\r\n"...)
 	return msgh
+}
+
+func (c *client) respAction(){
+
 }
 
 const argsLenMax = 3
