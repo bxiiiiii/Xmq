@@ -2,23 +2,27 @@ package server
 
 import (
 	"Xmq/logger"
-	"container/list"
+	rc "Xmq/registrationCenter"
+	// "container/list"
 	"sync"
 )
 
 type subcription struct {
-	sid     uint64
-	name    string
-	subtype int
-	clients map[string]*client
-	topic   topic
-	offset  uint64
-	clist   *list.List
+	// sid       uint64
+	Data    subcriptionData
+	Clients map[string]*client
+	// Clist   *list.List
+}
+
+type subcriptionData struct {
+	Meta   rc.SubcriptionNode
+	Offset uint64
+	Subers map[string]string
 }
 
 type sublist struct {
 	mu sync.RWMutex
-	s  map[string]*subcription
+	Subs  map[string]*subcription
 }
 
 func NewSublist() *sublist {
@@ -27,10 +31,18 @@ func NewSublist() *sublist {
 }
 
 func NewSubcription() *subcription {
-	c := make(map[string]*client)
-	l := list.New().Init()
-	return &subcription{clients: c, clist: l}
+	data := subcriptionData{
+		Subers: make(map[string]string),
+	}
+	sub := &subcription{
+		Clients: make(map[string]*client),
+		Data:    data,
+	}
+	// l := list.New().Init()
+	return sub
 }
+
+//TODO: above all need to update
 
 func (s *sublist) insertORupdate(sub *subcription) {
 	defer s.mu.Unlock()
@@ -88,7 +100,7 @@ func (s *subcription) deliverMsg(msgh []byte, msg []byte) {
 			v.mu.Unlock()
 		}
 	case Shared:
-		
+
 		// for _, v := range s.clients {
 		// 	v.mu.Lock()
 		// 	v.bw.Write(msgh)

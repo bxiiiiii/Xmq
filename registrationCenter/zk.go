@@ -1,29 +1,30 @@
-package zookeeper
+package RegistraionCenter
 
 import (
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strconv"
 	"time"
 
 	"github.com/samuel/go-zookeeper/zk"
 )
 
-var ZkCli *zkClient
+var ZkCli *ZkClient
 
 var (
 	host       = []string{"localhost:2181"}
 	root       = "/Xmq"
 	brokerRoot = root + "/broker"
 	topicRoot  = root + "/topic"
+	bundleRoot = root + "/bundle"
 )
 
-type zkClient struct {
+type ZkClient struct {
 	ZkServers    []string
 	ZkRoot       string
 	ZkBrokerRoot string
 	ZkTopicRoot  string
+	ZkBundleRoot string
 	Conn         *zk.Conn
 }
 
@@ -40,8 +41,23 @@ type TopicNode struct {
 }
 
 type PartitionNode struct {
-	Name      string `json:"name"`
-	TopicName string `json:"topicName"`
+	Name       string `json:"name"`
+	TopicName  string `json:"topicName"`
+	Mnum       uint64 `json:"mnum"`
+	ackOffset  uint64 `json:"ackoffset"`
+	pushOffset uint64 `json:"pushoffset"`
+}
+
+type BundleNode struct {
+	Name string
+	B    BrokerNode
+}
+
+type SubcriptionNode struct {
+	Name      string
+	TopicName string
+	Partition string
+	Subtype   int
 }
 
 func init() {
@@ -58,14 +74,19 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	err = ZkCli.ensureExist(ZkCli.ZkBundleRoot)
+	if err != nil {
+		panic(err)
+	}
 }
 
-func NewClient(zkServers []string, zkRoot string, timeout int) (*zkClient, error) {
-	c := &zkClient{}
+func NewClient(zkServers []string, zkRoot string, timeout int) (*ZkClient, error) {
+	c := &ZkClient{}
 	c.ZkRoot = zkRoot
 	c.ZkServers = zkServers
 	c.ZkBrokerRoot = brokerRoot
 	c.ZkTopicRoot = topicRoot
+	c.ZkBundleRoot = bundleRoot
 
 	Conn, _, err := zk.Connect(zkServers, time.Duration(timeout)*time.Second)
 	if err != nil {
@@ -76,45 +97,62 @@ func NewClient(zkServers []string, zkRoot string, timeout int) (*zkClient, error
 	return c, nil
 }
 
-func (c *zkClient) RegisterNode(znode interface{}) (err error) {
-	path := ""
-	var data []byte
-	var bnode BrokerNode
-	var tnode TopicNode
-	var pnode PartitionNode
-
-	i := reflect.TypeOf(znode)
-	switch i.Name() {
-	case "BrokerNode":
-		bnode = znode.(BrokerNode)
-		path += c.ZkBrokerRoot + "/" + bnode.Name
-		data, err = json.Marshal(bnode)
-	case "TopicNode":
-		tnode = znode.(TopicNode)
-		path += c.ZkTopicRoot + "/" + tnode.Name
-		data, err = json.Marshal(tnode)
-	case "PartitionNode":
-		pnode = znode.(PartitionNode)
-		path += c.ZkTopicRoot + "/" + pnode.TopicName + "/" + pnode.Name
-		data, err = json.Marshal(pnode)
-	}
+func (c *ZkClient) RegisterBnode(bnode BrokerNode) error {
+	path := c.ZkBrokerRoot + "/" + bnode.Name
+	data, err := json.Marshal(bnode)
 	if err != nil {
 		return err
 	}
-
-	_, err = c.Conn.Create(path, data, 0, zk.WorldACL(zk.PermAll))
-	if err != nil {
-		return err
-	}
-
-	return nil
+	// TODO: create temporary node
+	return c.RegisterNode(path, data)
 }
 
-func (c *zkClient) GetBrokers(topic string) ([]*PartitionNode, error) {
+func (c *ZkClient) RegisterTnode(tnode TopicNode) error {
+	path := c.ZkTopicRoot + "/" + tnode.Name
+	data, err := json.Marshal(tnode)
+	if err != nil {
+		return err
+	}
+	return c.RegisterNode(path, data)
+}
+
+func (c *ZkClient) RegisterPnode(pnode PartitionNode) error {
+	path := c.ZkTopicRoot + "/" + pnode.TopicName + "/" + pnode.Name
+	data, err := json.Marshal(pnode)
+	if err != nil {
+		return err
+	}
+	return c.RegisterNode(path, data)
+}
+
+func (c *ZkClient) RegisterBunode(bunode BundleNode) error {
+	path := c.ZkBundleRoot + "/" + bunode.Name
+	data, err := json.Marshal(bunode)
+	if err != nil {
+		return err
+	}
+	return c.RegisterNode(path, data)
+}
+
+func (c *ZkClient) RegistesSnode(snode *SubcriptionNode) error {
+	path := c.ZkTopicRoot + "/" + snode.TopicName + "/p" + snode.Partition + "/" + snode.Name
+	data, err := json.Marshal(snode)
+	if err != nil {
+		return err
+	}
+	return c.RegisterNode(path, data)
+}
+
+func (c *ZkClient) RegisterNode(path string, data []byte) error {
+	_, err := c.Conn.Create(path, data, 0, zk.WorldACL(zk.PermAll))
+	return err
+}
+
+func (c *ZkClient) GetBrokers(topic string) ([]*PartitionNode, error) {
 	var pNodes []*PartitionNode
 	path := c.ZkTopicRoot + "/" + topic
 
-	isExists, err := c.isTopicExists(topic)
+	isExists, err := c.IsTopicExists(topic)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +188,7 @@ func (c *zkClient) GetBrokers(topic string) ([]*PartitionNode, error) {
 	return pNodes, nil
 }
 
-func (c *zkClient) GetBroker(topic string, partition int) (*PartitionNode, error) {
+func (c *ZkClient) GetBroker(topic string, partition int) (*PartitionNode, error) {
 	path := c.ZkTopicRoot + "/" + topic + "/" + "p" + strconv.Itoa(partition)
 
 	isExists, err := c.isPartitionExists(topic, partition)
@@ -175,11 +213,30 @@ func (c *zkClient) GetBroker(topic string, partition int) (*PartitionNode, error
 	return pNode, nil
 }
 
-// func (c *zkClient) getZnode(path string) (){
+func (c *ZkClient) GetSub(snode *SubcriptionNode) (*SubcriptionNode, error) {
+	path := c.ZkTopicRoot + "/" + snode.TopicName + "/p" + snode.Partition + "/" + snode.Name
+	data, _, err := c.Conn.Get(path)
+	if err != nil {
+		return nil, err
+	}
+
+	sNode := &SubcriptionNode{}
+	if err = json.Unmarshal(data, sNode); err != nil {
+		return nil, err
+	}
+	return sNode, nil
+}
+
+func (c *ZkClient) GetPartion(topic string, partition int) (*PartitionNode, error) {
+	pNode := &PartitionNode{}
+	return pNode, nil
+}
+
+// func (c *ZkClient) getZnode(path string) (){
 
 // }
 
-func (c *zkClient) ensureExist(name string) error {
+func (c *ZkClient) ensureExist(name string) error {
 	isExists, _, err := c.Conn.Exists(name)
 	if err != nil {
 		return err
@@ -194,7 +251,7 @@ func (c *zkClient) ensureExist(name string) error {
 	return nil
 }
 
-func (c *zkClient) isTopicExists(topic string) (bool, error) {
+func (c *ZkClient) IsTopicExists(topic string) (bool, error) {
 	// path := c.ZkTopicRoot + "/" + topic
 	// isExists, _, err := c.Conn.Exists(path)
 	// if err != nil {
@@ -207,21 +264,26 @@ func (c *zkClient) isTopicExists(topic string) (bool, error) {
 	return c.isPartitionExists(topic, 1)
 }
 
-func (c *zkClient) isPartitionExists(topic string, partition int) (bool, error) {
+func (c *ZkClient) isPartitionExists(topic string, partition int) (bool, error) {
 	path := c.ZkTopicRoot + "/" + topic + "p" + strconv.Itoa(partition)
 	return c.isZnodeExists(path)
 }
 
-func (c *zkClient) isZnodeExists(path string) (bool, error) {
+func (c *ZkClient) IsSubcriptionExist(snode *SubcriptionNode) (bool, error) {
+	path := c.ZkTopicRoot + "/" + snode.TopicName + "/p" + snode.Partition + "/" + snode.Name
+	return c.isZnodeExists(path)
+}
+
+func (c *ZkClient) isZnodeExists(path string) (bool, error) {
 	isExists, _, err := c.Conn.Exists(path)
 	return isExists, err
 }
 
-func (c *zkClient) createTopic(topic string) error {
+func (c *ZkClient) createTopic(topic string) error {
 	return c.createPartitionTopic(topic, 1)
 }
 
-func (c *zkClient) createPartitionTopic(topic string, partition int) error {
+func (c *ZkClient) createPartitionTopic(topic string, partition int) error {
 	tPath := c.ZkTopicRoot + "/" + topic
 	tData := TopicNode{
 		Name: topic,
