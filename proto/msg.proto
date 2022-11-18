@@ -1,0 +1,82 @@
+
+syntax = "proto3";
+
+package proto;
+
+option go_package = "Xmq/proto";
+
+service Server {
+  rpc ProcessConn(ConnectArgs) returns (ConnectReply) {}
+  rpc ProcessSub(SubscribeArgs) returns (SubscribeReply) {}
+  rpc ProcessUnSub(UnSubscribeArgs) returns (UnSubscribeReply) {}
+  rpc ProcessPull(PullArgs) returns (PullReply) {}
+  rpc ProcessPub(PublishArgs) returns (PublistReply) {}
+}
+
+service Client {
+  rpc Msg(MsgArgs) returns (MsgReply) {}
+}
+
+message ConnectArgs {
+  string url = 1;
+}
+
+message ConnectReply {
+  int32 error = 1;
+}
+
+message SubscribeArgs {
+  enum SubType {
+    Exclusive = 0;
+    Shared = 1;
+    Failover = 2;
+    Key_Shared = 3;
+  }
+  string topic = 1;
+  int32 partition = 2;
+  string subscription = 3;
+  SubType subType = 4;
+  // key
+}
+
+message SubscribeReply {
+  int32 error = 1;
+}
+
+message PullArgs {
+  string topic = 1;
+  int32 partition = 2;
+  string subscription = 3;
+  int32 bufSize = 4;
+}
+
+message PullReply {
+  int32 error = 1;
+}
+
+message UnSubscribeArgs {
+  string topic = 1;
+  int32 partition = 2;
+  string subscription = 3;
+}
+
+message UnSubscribeReply {
+  int32 error = 1;
+}
+
+message PublishArgs {
+  string topic = 1;
+  int32 partition = 2;
+  int64 mid = 3;
+  string payload = 4;
+}
+
+message PublistReply {
+  int32 error = 1;
+}
+
+message MsgArgs {}
+
+message MsgReply {
+  int32 error = 1;
+}
