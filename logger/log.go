@@ -48,11 +48,11 @@ func getFilePath() string {
 }
 
 func getCurrentDir() string {
-	dir,_ := filepath.Abs(filepath.Dir(os.Args[0]))
+	dir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 	return strings.Replace(dir, "\\", "/", -1)
 }
 
-func SetLevel(level Level){
+func SetLevel(level Level) {
 	logLevel.SetLevel(zapcore.Level(level))
 }
 

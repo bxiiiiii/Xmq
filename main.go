@@ -2,11 +2,10 @@ package main
 
 import (
 	"Xmq/server"
+	rc "Xmq/registrationCenter"
 )
 
 func main() {
-	si := server.ServerInfo{}
-	server := server.NewServer(si)
-
-	server.Run()
+	server := server.NewServerFromConfig()
+	server.RunWithGrpc()
 }

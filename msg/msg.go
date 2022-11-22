@@ -9,8 +9,9 @@ type PubArg struct {
 	Szb       []byte
 	Partition int
 	Mid       int64
-	Msid      int64
+	Msid      uint64
 	Payload   []byte
+	Key       string
 }
 
 type PullArg struct {
@@ -20,6 +21,12 @@ type PullArg struct {
 	Bufsize   int
 	Full      chan bool
 	Timeout   chan bool
+}
+
+type MsgData struct {
+	Msid    uint64
+	Mid     int64
+	Payload string
 }
 
 func (pa *PullArg) CheckTimeout() {

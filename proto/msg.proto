@@ -6,23 +6,32 @@ package proto;
 option go_package = "Xmq/proto";
 
 service Server {
-  rpc ProcessConn(ConnectArgs) returns (ConnectReply) {}
+  rpc Connect(ConnectArgs) returns (ConnectReply) {}
   rpc ProcessSub(SubscribeArgs) returns (SubscribeReply) {}
   rpc ProcessUnSub(UnSubscribeArgs) returns (UnSubscribeReply) {}
   rpc ProcessPull(PullArgs) returns (PullReply) {}
-  rpc ProcessPub(PublishArgs) returns (PublistReply) {}
+  rpc ProcessPub(PublishArgs) returns (PublishReply) {}
+  rpc MsgAck(MsgAckArgs) returns (MsgAckReply) {}
+
+  rpc LookUp(LookUpArgs) returns (LookUpReply) {}
 }
 
 service Client {
   rpc Msg(MsgArgs) returns (MsgReply) {}
+  rpc Ack2puber(Ack2puberArgs) returns (Ack2puberReply) {}
 }
 
 message ConnectArgs {
-  string url = 1;
+  string name = 1;
+  string url = 2;
+  int32 redo = 3;
+  string topic = 4;
+  int32 partition = 5;
 }
 
 message ConnectReply {
-  int32 error = 1;
+  string error = 1;
+  string name = 2;
 }
 
 message SubscribeArgs {
@@ -32,51 +41,81 @@ message SubscribeArgs {
     Failover = 2;
     Key_Shared = 3;
   }
-  string topic = 1;
-  int32 partition = 2;
-  string subscription = 3;
-  SubType subType = 4;
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+  string subscription = 4;
+  SubType subType = 5;
   // key
+  uint64 pushOffset = 7;
+  int32 redo = 8;
 }
 
 message SubscribeReply {
-  int32 error = 1;
+  string error = 1;
 }
 
 message PullArgs {
-  string topic = 1;
-  int32 partition = 2;
-  string subscription = 3;
-  int32 bufSize = 4;
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+  string subscription = 4;
+  int32 bufSize = 5;
+  int32 timeout = 6;
+  int32 redo = 7;
 }
 
 message PullReply {
-  int32 error = 1;
+  string error = 1;
 }
 
 message UnSubscribeArgs {
-  string topic = 1;
-  int32 partition = 2;
-  string subscription = 3;
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+  string subscription = 4;
+  int32 redo = 5;
 }
 
-message UnSubscribeReply {
-  int32 error = 1;
-}
+message UnSubscribeReply {}
 
 message PublishArgs {
-  string topic = 1;
-  int32 partition = 2;
-  int64 mid = 3;
-  string payload = 4;
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+  int64 mid = 4;
+  string payload = 5;
+  int32 redo = 6;
 }
 
-message PublistReply {
-  int32 error = 1;
+message PublishReply {}
+
+message MsgArgs {
+  bytes payload = 1;
 }
 
-message MsgArgs {}
+message MsgReply {}
 
-message MsgReply {
-  int32 error = 1;
+message MsgAckArgs {
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+  string subscription = 4;
+  uint64 ackOffset = 5;
+}
+
+message MsgAckReply {}
+
+message Ack2puberArgs {}
+
+message Ack2puberReply {}
+
+message LookUpArgs {
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+}
+
+message LookUpReply {
+  string url = 1;
 }
