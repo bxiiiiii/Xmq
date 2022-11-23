@@ -1,0 +1,39 @@
+broker: {
+  name: broker1,
+  host: 127.0.0.1,
+  port: 8889,
+  defaultSendSize: 30,
+  rpcTimeout: 5,
+  loadWeight: {
+    cpu: ,
+    memory: ,
+    bandwidthIn: ,
+    bandwidthOut: 
+  },
+
+  syncWrite2disk: true,
+  asyncWriteMsglimit: 10,
+
+  isLoadBalancerEnabled: true,
+  collectLoadDataInterval: 5,
+  pushLoadDataInterval: 6,
+
+  defaultNumberOfBundles: 16,
+}
+
+zookeeper: {
+  host: {
+
+  },
+  root: /Xmq,
+  brokerRoot: /Xmq/broker,
+  topicRoot: /Xmq/topic,
+  bundleRoot: /Xmq/bundle,
+}
+
+etcd: {
+  Endpoints: {
+
+  },
+  DialTimeout: 5,
+}

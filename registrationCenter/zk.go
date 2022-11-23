@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	ct "Xmq/collect"
+
 	"github.com/samuel/go-zookeeper/zk"
 )
 
@@ -45,6 +47,7 @@ type BrokerNode struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
 	Pnum int    `json:"pnum"`
+	Load ct.BrokerUsage
 }
 
 type TopicNode struct {
@@ -199,6 +202,10 @@ func (c *ZkClient) RegisterWatcher(path string) error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (c *ZkClient) RegisterChildrenWatcher(path string) error {
 	return nil
 }
 
