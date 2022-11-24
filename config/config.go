@@ -24,14 +24,17 @@ type ServerConf struct {
 	CollectLoadDataInterval int
 	PushLoadDataInterval    int
 
-	defaultNumberOfBundles int
+	DefaultNumberOfBundles int
+
+	AllowRenameForClient bool
 }
 
 type loadWeight struct {
-	Cpu          float64
-	Memory       float64
-	BandwidthIn  float64
-	BandwidthOut float64
+	Cpu           float64
+	VirtualMemory float64
+	SwapMemory    float64
+	BandwidthIn   float64
+	BandwidthOut  float64
 }
 
 func init() {

@@ -7,40 +7,40 @@ import (
 )
 
 type BrokerUsage struct {
-	cpu           ResourceUsage
-	virtualMemory ResourceUsage
-	swapMemory    ResourceUsage
-	bandwidthIn   ResourceUsage
-	bandwidthOut  ResourceUsage
+	Cpu           ResourceUsage
+	VirtualMemory ResourceUsage
+	SwapMemory    ResourceUsage
+	BandwidthIn   ResourceUsage
+	BandwidthOut  ResourceUsage
 }
 
 type ResourceUsage struct {
-	usage float64
-	limit float64
+	Usage float64
+	Limit float64
 }
 
-func CollectLoadData() (usage BrokerUsage, err error) {
-	usage.cpu.usage, err = getCpu()
+func CollectLoadData() (Usage BrokerUsage, err error) {
+	Usage.Cpu.Usage, err = getCpu()
 	if err != nil {
-		return usage, err
+		return Usage, err
 	}
 
-	usage.virtualMemory.usage, err = getVirtualMemory()
+	Usage.VirtualMemory.Usage, err = getVirtualMemory()
 	if err != nil {
-		return usage, err
+		return Usage, err
 	}
 
-	usage.swapMemory.usage, err = getSwapMemory()
+	Usage.SwapMemory.Usage, err = getSwapMemory()
 	if err != nil {
-		return usage, err
+		return Usage, err
 	}
 
-	usage.bandwidthIn.usage, usage.bandwidthOut.usage, err = getBindwidthIO()
+	Usage.BandwidthIn.Usage, Usage.BandwidthOut.Usage, err = getBindwidthIO()
 	if err != nil {
-		return usage, err
+		return Usage, err
 	}
 
-	return usage, nil
+	return Usage, nil
 }
 
 func getCpu() (float64, error) {

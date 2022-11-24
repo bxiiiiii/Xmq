@@ -1,14 +1,14 @@
 broker: {
-  name: broker1,
-  host: 127.0.0.1,
+  name: "broker1",
+  host: "127.0.0.1",
   port: 8889,
   defaultSendSize: 30,
   rpcTimeout: 5,
   loadWeight: {
-    cpu: ,
-    memory: ,
-    bandwidthIn: ,
-    bandwidthOut: 
+    cpu: 1,
+    memory: 1,
+    bandwidthIn: 1,
+    bandwidthOut: 1,
   },
 
   syncWrite2disk: true,
@@ -19,16 +19,20 @@ broker: {
   pushLoadDataInterval: 6,
 
   defaultNumberOfBundles: 16,
+
+  brokerDeduplicationEnabled: false,
+
+  allowRenameForClient: true,
 }
 
 zookeeper: {
   host: {
 
   },
-  root: /Xmq,
-  brokerRoot: /Xmq/broker,
-  topicRoot: /Xmq/topic,
-  bundleRoot: /Xmq/bundle,
+  root: "/Xmq",
+  brokerRoot: /"Xmq/broker",
+  topicRoot: "/Xmq/topic",
+  bundleRoot: "/Xmq/bundle",
 }
 
 etcd: {
