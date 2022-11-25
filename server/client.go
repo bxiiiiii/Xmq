@@ -10,10 +10,12 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 const defaultBufSize = 65536
-const defaultSendSize = 30
+// const defaultSendSize = 30
 
 type client struct {
 	mu   sync.Mutex
@@ -48,14 +50,6 @@ type clientInfo struct {
 	name string
 	id   uint64
 }
-
-// subscribe type
-const (
-	Exclusive = iota
-	Failover
-	Shared
-	Key_Shared
-)
 
 func (c *client) readLoop() {
 	buffer := make([]byte, defaultBufSize)
@@ -105,7 +99,7 @@ func (c *client) processSub(arg []byte) error {
 	switch len(args) {
 	case 4:
 		sub.Data.Meta.TopicName = string(args[0])
-		sub.Data.Meta.Partition = string(parseSize(args[1]))
+		sub.Data.Meta.Partition = parseSize(args[1])
 		sub.Data.Meta.Name = string(args[2])
 		sub.Data.Meta.Subtype = parseSize(args[3])
 	default:
@@ -176,7 +170,7 @@ func (c *client) processSub(arg []byte) error {
 			//TODO: need some extra action
 		}
 	} else {
-		if err := c.srv.zkCli.RegistesSnode(snode); err != nil {
+		if err := c.srv.zkCli.RegisterSnode(snode); err != nil {
 			return err
 		}
 		sub.Clients[name] = c
@@ -210,25 +204,95 @@ func (c *client) processPull(arg []byte) error {
 	}
 
 	// TODO
-	topic, err := c.srv.zkCli.GetPartion(pua.Topic, pua.Partition)
-	if err != nil {
-		return err
-	}
+	// pNode, err := c.srv.zkCli.GetPartition(pua.Topic, pua.Partition)
+	// if err != nil {
+	// 	//do something
+	// }
+	pkey := fmt.Sprintf(partitionKey, pua.Topic, pua.Partition)
+	pNode := c.srv.ps[pkey]
 
+	skey := fmt.Sprintf(subcriptionKey, pua.Topic, pua.Partition, pua.Subname)
+	exSub := c.srv.Sl.Subs[skey]
+
+	prePushOffset := exSub.Data.PushOffset
 	go pua.CheckTimeout()
 
 	for {
-		// topic.Mnum
 		if _, ok := <-pua.Timeout; ok {
 			break
 		}
-		//get msgs
-		// c.sendMsg()
-	}
+		if pNode.Mnum > exSub.Data.PushOffset || pua.Bufsize <= 0 {
+			pua.Full <- true
+			break
+		}
 
+		pushedNum := 0
+		var msgs []*msg.MsgData
+		i := exSub.Data.PushOffset + 1
+		for i <= pNode.Mnum && pushedNum%defaultSendSize < defaultSendSize {
+			if pua.Bufsize <= 0 {
+				pua.Full <- true
+				break
+			}
+			var m *msg.MsgData
+			key := fmt.Sprintf(msgKey, pua.Topic, pua.Partition, i)
+			if en, ok := c.srv.msgs[key]; ok {
+				m = en
+			} else {
+				ms, err := c.srv.GetMsg(pua, i)
+				if err != nil {
+					return err
+				}
+				m = ms
+			}
+			msgs = append(msgs, m)
+			i++
+			pushedNum++
+			if pNode.PushOffset < i {
+				pNode.PushOffset = i
+			}
+		}
+		if err := c.sendMsg(pua, msgs); err != nil {
+			return err
+		}
+		exSub.Data.PushOffset += uint64(len(msgs))
+	}
 	c.respAction("")
-	// sub :=
+
+	if ok := c.waitAck(exSub.Ackch); ok {
+		exSub.Data.AckOffset = exSub.Data.PushOffset
+		if pNode.AckOffset < exSub.Data.AckOffset {
+			pNode.AckOffset = exSub.Data.AckOffset
+		}
+	} else {
+		var msgs []*msg.MsgData
+		for i := prePushOffset + 1; i <= pNode.AckOffset; i++ {
+			var m *msg.MsgData
+			key := fmt.Sprintf(msgKey, pua.Topic, pua.Partition, i)
+			if en, ok := c.srv.msgs[key]; ok {
+				m = en
+			} else {
+				ms, err := c.srv.GetMsg(pua, i)
+				if err != nil {
+					return err
+				}
+				m = ms
+			}
+			msgs = append(msgs, m)
+		}
+	}
 	return nil
+}
+
+
+// consider ack msid
+func (c *client) waitAck(ch chan uint64) bool {
+	select {
+	case <-time.After(time.Second * 10):
+		return false
+	case <-ch:
+		return true
+	}
 }
 
 func (c *client) processUnsub(arg []byte) error {
@@ -239,7 +303,7 @@ func (c *client) processUnsub(arg []byte) error {
 	switch len(args) {
 	case 3:
 		sub.Data.Meta.TopicName = string(args[0])
-		sub.Data.Meta.Partition = string(parseSize(args[1]))
+		sub.Data.Meta.Partition = parseSize(args[1])
 		sub.Data.Meta.Name = string(args[2])
 	default:
 		return logger.Errorf("num of args :%v", len(args))
@@ -292,38 +356,106 @@ func (c *client) processUnsub(arg []byte) error {
 	return nil
 }
 
-func (c *client) processMsg(msg []byte) {
+func (c *client) processPub(arg []byte) error {
+	logger.Debugf("Pub arg: '%s'", arg)
+	args := spiltArg(arg)
+	switch len(args) {
+	case 4:
+		c.pa.Topic = string(args[0])
+		c.pa.Partition = parseSize(args[1])
+		c.pa.Mid = bytes2int64(args[2])
+		c.pa.Size = parseSize(args[3])
+		c.pa.Szb = args[3]
+	case 5:
+		c.pa.Topic = string(args[0])
+		c.pa.Partition = parseSize(args[1])
+		c.pa.Key = string(args[2])
+		c.pa.Mid = bytes2int64(args[3])
+		c.pa.Size = parseSize(args[4])
+		c.pa.Szb = args[4]
+	default:
+		return logger.Errorf("processPub Parse failed: '%s'", arg)
+	}
+	if c.pa.Size < 0 {
+		return logger.Errorf("processPub Bad or Missing Size: '%s'", arg)
+	}
+	logger.Debugf("Pub parsed: %+v", c.pa)
+	return nil
+}
+
+func (c *client) processMsg(p []byte) {
 	c.nm++
 	if c.srv == nil {
 		return
 	}
-	c.pa.Payload = msg
+	// c.pa.Payload = p
+	var pNode *rc.PartitionNode
+	path := c.pa.Topic + "/p" + strconv.Itoa(c.pa.Partition)
+	if _, ok := c.srv.ps[path]; ok {
+		pNode = c.srv.ps[path]
+	} else {
+		isExists, err := c.srv.zkCli.IsPartitionExists(c.pa.Topic, c.pa.Partition)
+		if err != nil {
+			//do something
+			return
+		}
+		if isExists {
+			pNode, err = c.srv.zkCli.GetPartition(c.pa.Topic, c.pa.Partition)
+			c.srv.ps[path] = pNode
+		} else {
+			c.respAction("there is no this topic/partition")
+			return
+		}
+	}
+	//lock ?
+	atomic.AddUint64(&pNode.Mnum, 1)
 
-	if err := c.srv.PutMsg(&c.pa); err != nil {
-		c.respAction("error")
+	mData := msg.MsgData{
+		Mid:     c.pa.Mid,
+		Payload: string(p),
+	}
+	if err := c.srv.PutMsg(&c.pa, mData); err != nil {
+		//do something
+	}
+	c.respAction("success")
+
+	if err := c.srv.zkCli.UpdatePartition(pNode); err != nil {
+		//do something
 	}
 
-	scratch := [512]byte{}
-	msgh := scratch[:0]
+	// scratch := [512]byte{}
+	// msgh := scratch[:0]
 
-	msgh = append(msgh, "MSG "...)
-	msgh = append(msgh, []byte(c.pa.Topic)...)
-	msgh = append(msgh, ' ')
-	ms := len(msgh)
+	// msgh = append(msgh, "MSG "...)
+	// msgh = append(msgh, []byte(c.pa.Topic)...)
+	// msgh = append(msgh, ' ')
+	// ms := len(msgh)
 
-	subs := c.srv.Sl.getSuber(c.pa.Topic)
-	if len(subs) <= 0 {
-		return
-	}
+	// subs := c.srv.Sl.getSuber(c.pa.Topic)
+	// if len(subs) <= 0 {
+	// 	return
+	// }
 
-	for _, sub := range subs {
-		mh := c.msgHeader(msgh[:ms], sub)
-		sub.deliverMsg(mh, msg)
-	}
+	// for _, sub := range subs {
+	// 	mh := c.msgHeader(msgh[:ms], sub)
+	// 	sub.deliverMsg(mh, msg)
+	// }
 	// TODO
 }
 
-func (c *client) sendMsg()
+func (c *client) sendMsg(pa *msg.PullArg, m []*msg.MsgData) error {
+	var msgh []byte
+	msgh = append(msgh, "MSG "...)
+	msgh = append(msgh, []byte(pa.Topic)...)
+	msgh = append(msgh, " "...)
+	msgh = append(msgh, []byte(strconv.Itoa(pa.Partition))...)
+	
+	c.mu.Lock()
+	c.bw.Write(msgh)
+	c.bw.WriteString("\r\n")
+
+	return nil
+}
 
 func (c *client) processPing() {
 

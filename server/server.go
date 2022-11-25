@@ -2,6 +2,7 @@ package server
 
 import (
 	"Xmq/bundle"
+	"Xmq/config"
 	"Xmq/logger"
 	"Xmq/msg"
 	"Xmq/persist"
@@ -13,11 +14,14 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	lm "Xmq/loadManager"
 	pb "Xmq/proto"
 
+	"github.com/samuel/go-zookeeper/zk"
 	"github.com/spf13/viper"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
@@ -33,22 +37,31 @@ type ServerInfo struct {
 }
 
 type Server struct {
-	Info    ServerInfo
-	Running bool
-	Sl      *sublist
-	ps      map[string]*rc.PartitionNode
-	msgs    map[string]*msg.MsgData
-	gcid    uint64
-	zkCli   *rc.ZkClient //TODO: create
-	kv      clientv3.KV
-	bundles bundle.Bundles //TODO: create
+	Info       ServerInfo
+	Running    bool
+	Sl         *sublist
+	ps         map[string]*rc.PartitionNode
+	partitions sync.Map
+	msgs       map[string]*msg.MsgData
+	gcid       uint64
+	zkCli      *rc.ZkClient //TODO: create
+	kv         clientv3.KV
+	bundles    bundle.Bundles //TODO: create
 
 	grpcServer *grpc.Server
-	conns      map[string]*grpc.ClientConn
+	conns      sync.Map
+	// conns      map[string]*grpc.ClientConn
 
 	bundle2broker map[bundle.BundleInfo]ServerInfo
 
 	pb.UnimplementedServerServer
+
+	loadManager lm.LoadManager
+}
+
+type partitionData struct {
+	mu sync.Mutex
+	*rc.PartitionNode
 }
 
 const (
@@ -57,13 +70,26 @@ const (
 	partitionKey   = "%s/p%d"    //topic/partition
 )
 
+// subscribe/publish mode
+const (
+	Exclusive     = iota
+	WaitExclusive //pub only
+	Failover      // sub only
+	Shared
+	Key_Shared // sub only
+)
+
+const (
+	Puber = iota
+	Suber
+)
+
 var defaultSendSize int
 
 func NewServerFromConfig() *Server {
 	s := &Server{
-		ps:    make(map[string]*rc.PartitionNode),
-		msgs:  make(map[string]*msg.MsgData),
-		conns: make(map[string]*grpc.ClientConn),
+		ps:   make(map[string]*rc.PartitionNode),
+		msgs: make(map[string]*msg.MsgData),
 	}
 	info := ServerInfo{
 		ServerName: viper.GetString("broker.name"),
@@ -75,11 +101,25 @@ func NewServerFromConfig() *Server {
 	defaultSendSize = viper.GetInt("broker.defaultSendSize")
 
 	s.grpcServer = grpc.NewServer()
+
 	return s
 }
 
-func (s *Server) Online() {
+func (s *Server) Online() error {
+	bNode := rc.BrokerNode{
+		Name: config.SrvConf.Name,
+		Host: config.SrvConf.Host,
+		Port: config.SrvConf.Port,
+		Pnum: 0,
+		// Load: load,
+		LoadIndex: 0,
+	}
+	if err := rc.ZkCli.RegisterBnode(bNode); err != nil {
+		return err
+	}
 
+	s.loadManager.Run()
+	return nil
 }
 
 func (s *Server) RunWithGrpc() {
@@ -97,7 +137,7 @@ func (s *Server) RunWithGrpc() {
 }
 
 func (s *Server) ShutDown() {
-	s.grpcServer.GracefulStop()	
+	s.grpcServer.GracefulStop()
 	// notify registry
 }
 
@@ -216,22 +256,88 @@ func (s *Server) get(key string) ([]byte, error) {
 }
 
 func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.ConnectReply, error) {
-	reply := pb.ConnectReply{}
+	reply := &pb.ConnectReply{}
 	conn, err := grpc.Dial(args.Url, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		reply.Error = err.Error()
-		return &reply, err
+		return reply, err
 	}
 
-	i := 1
-	name := args.Name
-	for _, ok := s.conns[name]; ok; i++ {
-		name += strconv.Itoa(i)
-		reply.Name = name
+	preName := fmt.Sprintf(rc.PnodePath, rc.ZkCli.ZkTopicRoot, args.Topic, args.Partition)
+	switch args.Type {
+	case Puber:
+		preName = preName + "-publisher-" + args.Name
+		tNode, err := rc.ZkCli.GetTopic(args.Topic)
+		if err != nil {
+			logger.Errorf("GetTopic failed: %v")
+			conn.Close()
+			return reply, errors.New("404")
+		}
+		switch tNode.PulishMode {
+		case Exclusive:
+			isExists, err := rc.ZkCli.IsPubersExists(args.Topic, int(args.Partition))
+			if err != nil {
+				logger.Errorf("GetTopic failed: %v")
+				conn.Close()
+				return reply, errors.New("404")
+			}
+			if isExists {
+				logger.Debugf("This Exclusive topic already has a puber")
+				conn.Close()
+				return reply, errors.New("This Exclusive topic already has a puber")
+			} else {
+				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition)); err != nil {
+					logger.Errorf("RegisterLeadPuberNode failed: %v")
+					conn.Close()
+					return reply, errors.New("404")
+				} 
+			}
+		case WaitExclusive:
+			isExists, err := rc.ZkCli.IsPubersExists(args.Topic, int(args.Partition))
+			if err != nil {
+				logger.Errorf("IsPubersExists failed: %v")
+				conn.Close()
+				return reply, errors.New("404")
+			}
+			if isExists {
+				if _, ch, err := rc.ZkCli.RegisterLeadPuberWatch(args.Topic, int(args.Partition)); err != nil {
+					<- ch
+					//TODO: consider timeout and restart election
+				}
+			} else {
+				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition)); err != nil {
+					logger.Errorf("RegisterLeadPuberNode failed: %v")
+					conn.Close()
+					return reply, errors.New("404")
+				} 
+			}
+		}
+	case Suber:
+		preName = preName + "-subscriber-" + args.Name
 	}
-	s.conns[name] = conn
-	reply.Name = name
-	return &reply, nil
+
+	curName := preName
+	if config.SrvConf.AllowRenameForClient {
+		index := 1
+		for _, ok := s.conns.Load(curName); ok; index++ {
+			curName = preName
+			curName += "(" + strconv.Itoa(index) + ")"
+		}
+	} else {
+		if _, ok := s.conns.Load(curName); !ok {
+			return nil, errors.New("Name conflict, rename plz")
+		}
+	}
+
+	s.conns.Store(curName, conn)
+	reply.Name = curName
+	if preName != curName {
+		return reply, errors.New("Automatically rename")
+	}
+	return reply, nil
+}
+
+func (c *client) waitcallback(ch <-chan zk.Event) {
+	<-ch
 }
 
 func (c *client) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.SubscribeReply, error) {
@@ -386,7 +492,11 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 				pNode.PushOffset = i
 			}
 		}
-		c := pb.NewClientClient(s.conns[args.Name])
+		conn, ok := s.conns.Load(args.Name)
+		if !ok {
+			return nil, errors.New("connection does not exist")
+		}
+		c := pb.NewClientClient(conn.(*grpc.ClientConn))
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		payload, err := json.Marshal(msgs)
@@ -470,26 +580,26 @@ func (s *Server) ProcessUnsub(ctx context.Context, args *pb.UnSubscribeArgs) (*p
 
 func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.PublishReply, error) {
 	reply := &pb.PublishReply{}
-	var pNode *rc.PartitionNode
+	var pNode *partitionData
 	path := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
-	if _, ok := s.ps[path]; ok {
-		pNode = s.ps[path]
+	if v, ok := s.partitions.Load(path); ok {
+		pNode = v.(*partitionData)
 	} else {
 		isExists, err := s.zkCli.IsPartitionExists(args.Topic, int(args.Partition))
 		if err != nil {
 			return reply, err
 		}
 		if isExists {
-			pNode, err = s.zkCli.GetPartition(args.Topic, int(args.Partition))
-			s.ps[path] = pNode
+			pNode.PartitionNode, err = s.zkCli.GetPartition(args.Topic, int(args.Partition))
+			s.partitions.Store(path, pNode)
 		} else {
 			return reply, errors.New("there is no this topic/partition")
 		}
 	}
-	//lock ?
-	atomic.AddUint64(&pNode.Mnum, 1)
+
+	pNode.mu.Lock()
 	mData := msg.MsgData{
-		Mid:     args.Mid,
+		Msid:    pNode.Mnum + 1,
 		Payload: args.Payload,
 	}
 	pa := &msg.PubArg{
@@ -500,5 +610,7 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 	if err := s.PutMsg(pa, mData); err != nil {
 		return reply, err
 	}
+	pNode.Mnum += 1
+	pNode.mu.Unlock()
 	return reply, nil
 }

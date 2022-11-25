@@ -25,11 +25,12 @@ var (
 )
 
 var (
-	BnodePath  = "%v/%v"        // BrokerRoot/BrokerName
-	TnodePath  = "%v/%v"        // TopicRoot/TopicName
-	BunodePath = "%v/%v"        // BundleRoot/BundleName
-	PnodePath  = "%v/%v/p%v"    // TopicRoot/TopicName/PartitionName
-	SnodePath  = "%v/%v/p%v/%v" // PnodePath/SubcriptionName
+	BnodePath     = "%v/%v"            // BrokerRoot/BrokerName
+	TnodePath     = "%v/%v"            // TopicRoot/TopicName
+	BunodePath    = "%v/bundle%v"      // BundleRoot/BundleName
+	PnodePath     = "%v/%v/p%v"        // TopicRoot/TopicName/PartitionName
+	SnodePath     = "%v/%v/p%v/%v"     // PnodePath/SubcriptionName
+	LeadPuberPath = "%v/%v/p%v/leader" // TopicRoot/TopicName/PartitionName
 )
 
 type ZkClient struct {
@@ -43,30 +44,35 @@ type ZkClient struct {
 }
 
 type BrokerNode struct {
-	Name string `json:"name"`
-	Host string `json:"host"`
-	Port int    `json:"port"`
-	Pnum int    `json:"pnum"`
-	Load ct.BrokerUsage
+	Name      string `json:"name"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Pnum      int    `json:"pnum"`
+	Load      ct.BrokerUsage
+	LoadIndex float64
 }
 
 type TopicNode struct {
-	Name string `json:"name"`
-	Pnum int    `json:"pnum"`
+	Name       string `json:"name"`
+	Pnum       int    `json:"pnum"`
+	PulishMode int
 }
 
 type PartitionNode struct {
-	Name       int    `json:"name"`
+	ID         int    `json:"name"`
 	TopicName  string `json:"topicName"`
 	Mnum       uint64 `json:"mnum"`
 	AckOffset  uint64 `json:"ackoffset"`
 	PushOffset uint64 `json:"pushoffset"`
+	Url        string
 	// Version    int32
 }
 
 type BundleNode struct {
-	Name string
-	B    BrokerNode
+	ID        int
+	Start     uint32
+	End       uint32
+	BrokerUrl string
 }
 
 type SubcriptionNode struct {
@@ -76,9 +82,9 @@ type SubcriptionNode struct {
 	Subtype   int
 }
 
-// type LeaderNode struct {
-
-// }
+type LeaderNode struct {
+	LeaderUrl string
+}
 
 func init() {
 	ZkCli, _ = NewClient(host, root, 3)
@@ -155,7 +161,7 @@ func (c *ZkClient) RegisterTnode(tnode TopicNode) error {
 }
 
 func (c *ZkClient) RegisterPnode(pnode PartitionNode) error {
-	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, pnode.TopicName, pnode.Name)
+	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, pnode.TopicName, pnode.ID)
 	data, err := json.Marshal(pnode)
 	if err != nil {
 		return err
@@ -164,7 +170,7 @@ func (c *ZkClient) RegisterPnode(pnode PartitionNode) error {
 }
 
 func (c *ZkClient) RegisterBunode(bunode BundleNode) error {
-	path := fmt.Sprintf(BunodePath, c.ZkBundleRoot, bunode.Name)
+	path := fmt.Sprintf(BunodePath, c.ZkBundleRoot, bunode.ID)
 	data, err := json.Marshal(bunode)
 	if err != nil {
 		return err
@@ -181,7 +187,12 @@ func (c *ZkClient) RegisterSnode(snode *SubcriptionNode) error {
 	return c.RegisterNode(path, data)
 }
 
-func (c *ZkClient) RegisterLnode() error {
+func (c *ZkClient) RegisterLeadPuberNode(topic string, partition int) error {
+	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, topic, partition)
+	return c.registerTemNode(path, []byte{65})
+}
+
+func (c *ZkClient) RegisterLeadBrokernode() error {
 	return c.registerTemNode(leaderPath, []byte{65})
 }
 
@@ -197,16 +208,23 @@ func (c *ZkClient) registerTemNode(path string, data []byte) error {
 	return err
 }
 
-func (c *ZkClient) RegisterWatcher(path string) error {
-	_, _, _, err := c.Conn.ExistsW(path)
-	if err != nil {
-		return err
-	}
-	return nil
+func (c *ZkClient) RegisterLeadBrokerWatch() (bool, <-chan zk.Event, error) {
+	return c.registerWatcher(leaderPath)
 }
 
-func (c *ZkClient) RegisterChildrenWatcher(path string) error {
-	return nil
+func (c *ZkClient) RegisterLeadPuberWatch(topic string, partition int) (bool, <-chan zk.Event, error) {
+	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, topic, partition)
+	return c.registerWatcher(path)
+}
+
+func (c *ZkClient) registerWatcher(path string) (bool, <-chan zk.Event, error) {
+	isExists, _, ch, err := c.Conn.ExistsW(path)
+	return isExists, ch, err
+}
+
+func (c *ZkClient) RegisterChildrenWatcher(path string) ([]string, <-chan zk.Event, error) {
+	znodes, _, ch, err := c.Conn.ChildrenW(path)
+	return znodes, ch, err
 }
 
 func (c *ZkClient) GetBrokers(topic string) ([]*PartitionNode, error) {
@@ -273,9 +291,22 @@ func (c *ZkClient) GetBroker(topic string, partition int) (*PartitionNode, error
 	return pNode, nil
 }
 
+func (c *ZkClient) GetTopic(topic string) (*TopicNode, error) {
+	path := fmt.Sprintf(TnodePath, c.ZkTopicRoot, topic)
+	data, _, err := c.Conn.Get(path)
+	if err != nil {
+		return nil, err
+	}
+
+	tNode := &TopicNode{}
+	if err = json.Unmarshal(data, tNode); err != nil {
+		return nil, err
+	}
+	return tNode, nil
+}
+
 func (c *ZkClient) GetSub(snode *SubcriptionNode) (*SubcriptionNode, error) {
 	path := fmt.Sprintf(SnodePath, c.ZkTopicRoot, snode.TopicName, snode.Partition, snode.Name)
-
 	data, _, err := c.Conn.Get(path)
 	if err != nil {
 		return nil, err
@@ -291,6 +322,78 @@ func (c *ZkClient) GetSub(snode *SubcriptionNode) (*SubcriptionNode, error) {
 func (c *ZkClient) GetPartition(topic string, partition int) (*PartitionNode, error) {
 	pNode := &PartitionNode{}
 	return pNode, nil
+}
+
+func (c *ZkClient) GetBundles(bnum int) ([]*BundleNode, error) {
+	var bundles []*BundleNode
+	for bnum > 0 {
+		bNode, err := c.GetBundle(bnum)
+		if err != nil {
+			return nil, err
+		}
+		bundles = append(bundles, bNode)
+		bnum--
+	}
+	return bundles, nil
+}
+
+func (c *ZkClient) GetBundle(id int) (*BundleNode, error) {
+	path := fmt.Sprintf(BunodePath, id)
+	data, _, err := c.Conn.Get(path)
+	if err != nil {
+		return nil, err
+	}
+
+	bNode := &BundleNode{}
+	if err = json.Unmarshal(data, bNode); err != nil {
+		return nil, err
+	}
+	return bNode, nil
+}
+
+func (c *ZkClient) GetLeader() (*LeaderNode, error) {
+	data, _, err := c.Conn.Get(leaderPath)
+	if err != nil {
+		return nil, err
+	}
+
+	lNode := &LeaderNode{}
+	if err = json.Unmarshal(data, lNode); err != nil {
+		return nil, err
+	}
+	return lNode, nil
+}
+
+func (c *ZkClient) GetAllBrokers() ([]*BrokerNode, error) {
+	var brokers []*BrokerNode
+	znodes, _, err := c.Conn.Children(brokerRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, znode := range znodes {
+		bPath := brokerRoot + "/" + znode
+		data, _, err := c.Conn.Get(bPath)
+		if err != nil {
+			return nil, err
+		}
+		bNode := &BrokerNode{}
+		err = json.Unmarshal(data, bNode)
+		if err != nil {
+			return nil, err
+		}
+		brokers = append(brokers, bNode)
+	}
+	return brokers, nil
+}
+
+func (c *ZkClient) IsPubersExists(topic string, partition int) (bool, error) {
+	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, topic, partition)
+	pubers, _, err := c.Conn.Children(path)
+	if err != nil {
+		return false, err
+	}
+	return len(pubers) == 0, nil
 }
 
 // func (c *ZkClient) getZnode(path string) (){
@@ -363,7 +466,7 @@ func (c *ZkClient) createPartitionTopic(topic string, partition int) error {
 	for i := 1; i <= partition; i++ {
 		pPath := tPath + "/" + "p" + strconv.Itoa(i)
 		pData := PartitionNode{
-			Name:      i,
+			ID:        i,
 			TopicName: topic,
 		}
 		pdata, _ := json.Marshal(pData)
@@ -376,12 +479,22 @@ func (c *ZkClient) createPartitionTopic(topic string, partition int) error {
 }
 
 func (c *ZkClient) UpdatePartition(pNode *PartitionNode) error {
-	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, pNode.TopicName, pNode.Name)
+	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, pNode.TopicName, pNode.ID)
 	data, err := json.Marshal(pNode)
 	if err != nil {
 		return err
 	}
 	//TODO: version 0?
+	_, err = c.Conn.Set(path, data, 0)
+	return err
+}
+
+func (c *ZkClient) UpdateBroker(bNode BrokerNode) error {
+	path := fmt.Sprintf(BnodePath, c.ZkBrokerRoot, bNode.Name)
+	data, err := json.Marshal(bNode)
+	if err != nil {
+		return err
+	}
 	_, err = c.Conn.Set(path, data, 0)
 	return err
 }
