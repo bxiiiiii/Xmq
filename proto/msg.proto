@@ -15,11 +15,29 @@ service Server {
 
   rpc LookUp(LookUpArgs) returns (LookUpReply) {}
   rpc RequestAlloc(RequestAllocArgs) returns (RequestAllocReply) {}
+  rpc GetTopicInfo(GetTopicInfoArgs) returns (GetTopicInfoReply) {}
 }
 
 service Client {
-  rpc Msg(MsgArgs) returns (MsgReply) {}
+  rpc ProcessMsg(MsgArgs) returns (MsgReply) {}
   rpc Ack2puber(Ack2puberArgs) returns (Ack2puberReply) {}
+}
+
+message LookUpArgs {
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+  int32 redo = 4;
+}
+
+message LookUpReply {
+  string url = 1;
+}
+
+message RequestAllocArgs {}
+
+message RequestAllocReply {
+  string url = 1;
 }
 
 message ConnectArgs {
@@ -37,7 +55,7 @@ message ConnectReply {
 }
 
 message SubscribeArgs {
-  enum SubType {
+  enum SubMode {
     Exclusive = 0;
     Shared = 1;
     Failover = 2;
@@ -47,9 +65,9 @@ message SubscribeArgs {
   string topic = 2;
   int32 partition = 3;
   string subscription = 4;
-  SubType subType = 5;
+  SubMode mode = 5;
   int32 key = 6;
-  uint64 pushOffset = 7;
+  uint64 subOffset = 7;
   int32 redo = 8;
 }
 
@@ -86,14 +104,21 @@ message PublishArgs {
   string topic = 2;
   int32 partition = 3;
   int64 mid = 4;
-  string payload = 5;
-  int32 redo = 6;
+  int64 msid = 5;
+  string payload = 6;
+  int32 redo = 7;
 }
 
 message PublishReply {}
 
 message MsgArgs {
-  bytes payload = 1;
+  string name = 1;
+  string topic = 2;
+  int32 partition = 3;
+  int64 mid = 4;
+  int64 msid = 5;
+  string payload = 6;
+  int32 redo = 7;
 }
 
 message MsgReply {}
@@ -112,18 +137,13 @@ message Ack2puberArgs {}
 
 message Ack2puberReply {}
 
-message LookUpArgs {
+message GetTopicInfoArgs {
   string name = 1;
   string topic = 2;
-  int32 partition = 3;
+  int32 redo = 3;
 }
 
-message LookUpReply {
-  string url = 1;
-}
-
-message RequestAllocArgs {}
-
-message RequestAllocReply {
-  string url = 1;
+message GetTopicInfoReply {
+  string name = 1;
+  int32 partitionNum = 2;
 }

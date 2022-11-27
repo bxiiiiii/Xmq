@@ -5,6 +5,7 @@ import (
 	"Xmq/config"
 	"Xmq/logger"
 	rc "Xmq/registrationCenter"
+	"sort"
 	"sync"
 	"time"
 
@@ -18,17 +19,23 @@ const (
 
 var cbch chan bool
 
-type loadManager struct {
-	mu    sync.Mutex
-	state int
-	load  ct.BrokerUsage
+type LoadManager struct {
+	Mu    sync.Mutex
+	State int
+	BNode rc.BrokerNode
+
+	LoadRanking []*rc.BrokerNode
 }
 
 type LoadReport struct {
 }
 
-func (lm *loadManager) Run() {
-	
+//func NewLoadManager()
+
+func (lm *LoadManager) Run() {
+	go lm.startCollectLoadData()
+	go lm.pushLoadReport2registry()
+	go lm.startLeaderElection()
 }
 
 func callback(e zk.Event) {
@@ -36,7 +43,7 @@ func callback(e zk.Event) {
 	logger.Debugf("leader watcher is notified to restart LeaderElection")
 }
 
-func (lm *loadManager) startLeaderElection() {
+func (lm *LoadManager) startLeaderElection() {
 	zkcli, err := rc.NewClientWithCallback(callback)
 	if err != nil {
 		logger.Errorf("NewClientWithCallback failed: %v", err)
@@ -52,14 +59,14 @@ func (lm *loadManager) startLeaderElection() {
 			if err := zkcli.RegisterWatcher(zkcli.ZkLeaderRoot); err != nil {
 				logger.Errorf("RegisterWatcher failed: %v", err)
 			}
-			lm.state = Follower
+			lm.State = Follower
 
 		} else {
 			if err := rc.ZkCli.RegisterLnode(); err != nil {
 				logger.Errorf("RegisterLnode failed: %v", err)
 				lm.startLeaderElection()
 			} else {
-				lm.state = Leader
+				lm.State = Leader
 			}
 		}
 
@@ -67,32 +74,74 @@ func (lm *loadManager) startLeaderElection() {
 	}
 }
 
-func (lm *loadManager) brokerIsTheLeaderNow() {
+func (lm *LoadManager) brokerIsTheLeaderNow() {
 	if config.SrvConf.IsLoadBalancerEnabled {
-
+		lm.startWatchAllBrokers()
+		lm.pullAllBrokersLoad()
 	}
 }
 
-func (lm *loadManager) brokerIsAFollowerNow() {
+func (lm *LoadManager) startWatchAllBrokers() {
+	path := rc.ZkCli.ZkBrokerRoot + "/"
+	curBrokers, ch, err := rc.ZkCli.RegisterChildrenWatcher(path)
+	if err != nil {
+		logger.Errorf("RegisterChildrenWatcher failed: %v", err)
+	}                                                                             
+}
+
+func (lm *LoadManager) brokerIsAFollowerNow() {
 
 }
 
-func (lm *loadManager) startCollectLoadData() {
+func (lm *LoadManager) startCollectLoadData() {
 	for {
 		usage, err := ct.CollectLoadData()
 		if err != nil {
 			logger.Errorf("CollectLoadData failed: %v", err)
 		} else {
-			lm.load = usage
+			lm.BNode.Load = usage
 		}
 		time.Sleep(time.Second * time.Duration(config.SrvConf.CollectLoadDataInterval))
 	}
 }
 
-func (lm *loadManager) generateLoadReport() {
+func (lm *LoadManager) generateLoadReport() {
 
 }
 
-func (lm *loadManager) pushLoadReport2registry() {
+func (lm *LoadManager) pushLoadReport2registry() {
+	for {
+		if err := rc.ZkCli.UpdateBroker(lm.BNode); err != nil {
+			logger.Errorf("UpdateBroker failed: %v", err)
+		}
+		time.Sleep(time.Second * time.Duration(config.SrvConf.PushLoadDataInterval))
+	}
+}
 
+func (lm *LoadManager) pullAllBrokersLoad() error {
+	brokers, err := rc.ZkCli.GetAllBrokers()
+	if err != nil {
+		return err
+	}
+	lm.LoadRanking = brokers
+	return nil
+}
+
+func (lm *LoadManager) CalculateLoad() {
+	for _, en := range lm.LoadRanking {
+		en.LoadIndex = lm.calculateMethod(en.Load)
+	}
+
+	sort.SliceStable(lm.LoadRanking, func(i, j int) bool {
+		return lm.LoadRanking[i].LoadIndex < lm.LoadRanking[j].LoadIndex
+	})
+}
+
+func (lm *LoadManager) calculateMethod(b ct.BrokerUsage) float64 {
+	result := b.Cpu.Usage*config.SrvConf.Lw.Cpu +
+		b.SwapMemory.Usage*config.SrvConf.Lw.SwapMemory +
+		b.VirtualMemory.Usage*config.SrvConf.Lw.VirtualMemory +
+		b.BandwidthIn.Usage*config.SrvConf.Lw.BandwidthIn +
+		b.BandwidthOut.Usage*config.SrvConf.Lw.BandwidthOut
+	return result
 }

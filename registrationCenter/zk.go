@@ -25,12 +25,13 @@ var (
 )
 
 var (
-	BnodePath     = "%v/%v"            // BrokerRoot/BrokerName
-	TnodePath     = "%v/%v"            // TopicRoot/TopicName
-	BunodePath    = "%v/bundle%v"      // BundleRoot/BundleName
-	PnodePath     = "%v/%v/p%v"        // TopicRoot/TopicName/PartitionName
-	SnodePath     = "%v/%v/p%v/%v"     // PnodePath/SubcriptionName
-	LeadPuberPath = "%v/%v/p%v/leader" // TopicRoot/TopicName/PartitionName
+	BnodePath     = "%v/%v"               // BrokerRoot/BrokerName
+	TnodePath     = "%v/%v"               // TopicRoot/TopicName
+	BunodePath    = "%v/bundle%v"         // BundleRoot/BundleName
+	PnodePath     = "%v/%v/p%v"           // TopicRoot/TopicName/PartitionName
+	SnodePath     = "%v/%v/p%v/%v"        // TopicRoot/TopicName/PartitionName/SubcriptionName
+	LeadPuberPath = "%v/%v/p%v/leader"    // TopicRoot/TopicName/PartitionName
+	LeadSuberPath = "%v/%v/p%v/%v/leader" // TopicRoot/TopicName/PartitionName/SubcriptionName
 )
 
 type ZkClient struct {
@@ -192,6 +193,11 @@ func (c *ZkClient) RegisterLeadPuberNode(topic string, partition int) error {
 	return c.registerTemNode(path, []byte{65})
 }
 
+func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscription string) error {
+	path := fmt.Sprintf(LeadSuberPath, c.ZkTopicRoot, topic, partition, subscription)
+	return c.registerTemNode(path, []byte{65})
+}
+
 func (c *ZkClient) RegisterLeadBrokernode() error {
 	return c.registerTemNode(leaderPath, []byte{65})
 }
@@ -214,6 +220,11 @@ func (c *ZkClient) RegisterLeadBrokerWatch() (bool, <-chan zk.Event, error) {
 
 func (c *ZkClient) RegisterLeadPuberWatch(topic string, partition int) (bool, <-chan zk.Event, error) {
 	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, topic, partition)
+	return c.registerWatcher(path)
+}
+
+func (c *ZkClient) RegisterLeadSuberWatch(topic string, partition int, subscription string) (bool, <-chan zk.Event, error) {
+	path := fmt.Sprintf(LeadSuberPath, c.ZkTopicRoot, topic, partition, subscription)
 	return c.registerWatcher(path)
 }
 
@@ -394,6 +405,15 @@ func (c *ZkClient) IsPubersExists(topic string, partition int) (bool, error) {
 		return false, err
 	}
 	return len(pubers) == 0, nil
+}
+
+func (c *ZkClient) IsSubersExists(topic string, partition int, subscription string) (bool, error) {
+	path := fmt.Sprintf(SnodePath, c.ZkTopicRoot, topic, partition, subscription)
+	subers, _, err := c.Conn.Children(path)
+	if err != nil {
+		return false, err
+	}
+	return len(subers) == 0, nil
 }
 
 // func (c *ZkClient) getZnode(path string) (){
