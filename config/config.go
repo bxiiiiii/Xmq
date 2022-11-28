@@ -8,6 +8,10 @@ import (
 
 var SrvConf = new(ServerConf)
 
+var ZkConf = new(ZookeeperConf)
+
+var EConf = new(EtcdConf)
+
 type ServerConf struct {
 	Name            string
 	Host            string
@@ -27,6 +31,23 @@ type ServerConf struct {
 	DefaultNumberOfBundles int
 
 	AllowRenameForClient bool
+
+	OperationRedoNum int
+	OperationTimeout int
+}
+
+type ZookeeperConf struct {
+	Host           []string
+	Root           string
+	BrokerRoot     string
+	TopicRoot      string
+	BundleRoot     string
+	SessionTimeout int
+}
+
+type EtcdConf struct {
+	Endpoints   []string
+	DialTimeout int
 }
 
 type loadWeight struct {
@@ -46,7 +67,16 @@ func GetConfig() {
 	if err := viper.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("ReadInConfig failed, err: %v", err))
 	}
+
 	if err := viper.Unmarshal(&SrvConf); err != nil {
-		panic(fmt.Errorf("Unmarshal to Conf failed, err: %v", err))
+		panic(fmt.Errorf("Unmarshal to SrvConf failed, err: %v", err))
+	}
+
+	if err := viper.Unmarshal(&ZkConf); err != nil {
+		panic(fmt.Errorf("Unmarshal to ZkConf failed, err: %v", err))
+	}
+	
+	if err := viper.Unmarshal(&EConf); err != nil {
+		panic(fmt.Errorf("Unmarshal to EtcdConf failed, err: %v", err))
 	}
 }

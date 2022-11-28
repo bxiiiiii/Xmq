@@ -34,7 +34,11 @@ message LookUpReply {
   string url = 1;
 }
 
-message RequestAllocArgs {}
+message RequestAllocArgs {
+  string topic = 1;
+  int32 partition = 2;
+  int32 redo = 3;
+}
 
 message RequestAllocReply {
   string url = 1;
@@ -116,7 +120,7 @@ message MsgArgs {
   string topic = 2;
   int32 partition = 3;
   int64 mid = 4;
-  int64 msid = 5;
+  uint64 msid = 5;
   string payload = 6;
   int32 redo = 7;
 }

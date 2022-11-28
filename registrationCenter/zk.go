@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"Xmq/config"
+
 	ct "Xmq/collect"
 
 	"github.com/samuel/go-zookeeper/zk"
@@ -21,7 +23,6 @@ var (
 	topicRoot  = root + "/topic"
 	bundleRoot = root + "/bundle"
 	leaderPath = root + "/leader"
-	timeout    = 0
 )
 
 var (
@@ -133,7 +134,7 @@ func NewClientWithCallback(cb func(e zk.Event)) (*ZkClient, error) {
 		//todo: get from config
 	}
 	eventCallbackOption := zk.WithEventCallback(cb)
-	conn, _, err := zk.Connect(host, time.Second*time.Duration(timeout), eventCallbackOption)
+	conn, _, err := zk.Connect(host, time.Second*time.Duration(config.ZkConf.SessionTimeout), eventCallbackOption)
 	if err != nil {
 		return nil, err
 	}
@@ -198,8 +199,8 @@ func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscripti
 	return c.registerTemNode(path, []byte{65})
 }
 
-func (c *ZkClient) RegisterLeadBrokernode() error {
-	return c.registerTemNode(leaderPath, []byte{65})
+func (c *ZkClient) RegisterLeadBrokernode(url string) error {
+	return c.registerTemNode(leaderPath, []byte(url))
 }
 
 func (c *ZkClient) RegisterNode(path string, data []byte) error {
@@ -509,9 +510,19 @@ func (c *ZkClient) UpdatePartition(pNode *PartitionNode) error {
 	return err
 }
 
-func (c *ZkClient) UpdateBroker(bNode BrokerNode) error {
+func (c *ZkClient) UpdateBroker(bNode *BrokerNode) error {
 	path := fmt.Sprintf(BnodePath, c.ZkBrokerRoot, bNode.Name)
 	data, err := json.Marshal(bNode)
+	if err != nil {
+		return err
+	}
+	_, err = c.Conn.Set(path, data, 0)
+	return err
+}
+
+func (c *ZkClient) UpdateBundle(buNode *BundleNode) error {
+	path := fmt.Sprintf(BunodePath, c.ZkBundleRoot, buNode.ID)
+	data, err := json.Marshal(buNode)
 	if err != nil {
 		return err
 	}
