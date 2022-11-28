@@ -40,17 +40,16 @@ type Server struct {
 	Info       ServerInfo
 	Running    bool
 	Sl         *sublist
-	ps         map[string]*rc.PartitionNode
+	ps         map[string]*partitionData
 	partitions sync.Map
-	msgs       map[string]*msg.MsgData
-	gcid       uint64
-	zkCli      *rc.ZkClient //TODO: create
-	kv         clientv3.KV
-	bundles    bundle.Bundles //TODO: create
+
+	gcid    uint64
+	zkCli   *rc.ZkClient //TODO: create
+	kv      clientv3.KV
+	bundles bundle.Bundles //TODO: create
 
 	grpcServer *grpc.Server
 	conns      sync.Map
-	// conns      map[string]*grpc.ClientConn
 
 	bundle2broker map[bundle.BundleInfo]ServerInfo
 
@@ -60,8 +59,9 @@ type Server struct {
 }
 
 type partitionData struct {
-	mu sync.Mutex
-	*rc.PartitionNode
+	mu    sync.Mutex
+	pNode *rc.PartitionNode
+	msgs  sync.Map
 }
 
 const (
@@ -88,8 +88,7 @@ var defaultSendSize int
 
 func NewServerFromConfig() *Server {
 	s := &Server{
-		ps:   make(map[string]*rc.PartitionNode),
-		msgs: make(map[string]*msg.MsgData),
+		ps: make(map[string]*partitionData),
 	}
 	info := ServerInfo{
 		ServerName: viper.GetString("broker.name"),
@@ -455,29 +454,26 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 		if err != nil {
 			// todo
 		}
-		s.ps[name] = pNode
+		s.ps[name].pNode = pNode
 	}
-	
+
+	s.ps[name].mu.Lock()
 	switch args.SubOffset {
 	case 0:
-		sub.Data.PushOffset = s.ps[name].PushOffset + 1
+		sub.Data.PushOffset = s.ps[name].pNode.PushOffset + 1
 	default:
-		if sub.Data.PushOffset >= s.ps[name].Mnum {
-			sub.Data.PushOffset = s.ps[name].PushOffset + 1
+		if sub.Data.PushOffset >= s.ps[name].pNode.Mnum {
+			sub.Data.PushOffset = s.ps[name].pNode.PushOffset + 1
 		} else {
 			sub.Data.PushOffset = args.SubOffset
 		}
 	}
+	s.ps[name].mu.Unlock()
+
 	if err := s.PutSubcription(sub); err != nil {
 		reply.Error = err.Error()
 		return reply, err
 	}
-
-	//TODO: map operations above all are safe ?
-
-	// if c.srv != nil {
-	// 	c.srv.Sl.insertORupdate(sub)
-	// }
 
 	return reply, nil
 }
@@ -503,23 +499,114 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 		if _, ok := <-pua.Timeout; ok {
 			break
 		}
-		if pNode.Mnum > exSub.Data.PushOffset || pua.Bufsize <= 0 {
+		if pNode.pNode.Mnum > exSub.Data.PushOffset || pua.Bufsize <= 0 {
+			pua.Full <- true
+			break
+		}
+
+		exSub.mu.Lock()
+		i := exSub.Data.PushOffset
+		if i <= pNode.pNode.Mnum {
+			var m *msg.MsgData
+			key := fmt.Sprintf(msgKey, pua.Topic, pua.Partition, i)
+			if en, ok := pNode.msgs.Load(key); ok {
+				m = en.(*msg.MsgData)
+			} else {
+				ms, err := s.GetMsg(pua, i)
+				if err != nil {
+					reply.Error = err.Error()
+					return reply, err
+				}
+				m = ms
+			}
+			i++
+			exSub.mu.Unlock()
+			mArgs := &pb.MsgArgs{
+				Name:      key,
+				Topic:     args.Topic,
+				Partition: args.Partition,
+				Mid:       m.Mid,
+				Msid:      m.Msid,
+				Payload:   m.Payload,
+				Redo:      0,
+			}
+			_, err := s.sendMsgWithRedo(mArgs, exSub, config.SrvConf.OperationTimeout)
+			if err != nil {
+				logger.Errorf("sendMsgWithRedo failed: %v", err)
+				// dead letter
+			}
+			pua.Bufsize--
+
+			pNode.mu.Lock()
+			if pNode.pNode.PushOffset < i {
+				pNode.pNode.PushOffset = i
+			}
+			pNode.mu.Unlock()
+		}
+	}
+	return reply, nil
+}
+
+func (s *Server) sendMsgWithRedo(args *pb.MsgArgs, sub *subcription, timeout int) (*pb.MsgReply, error) {
+	if args.Redo >= int32(config.SrvConf.OperationRedoNum) {
+		return nil, errors.New("match max redo")
+	}
+
+	reply, err := s.sendMsg(args, sub, timeout)
+	if err != nil {
+		logger.Errorf("sendMsg failed, try to resend: %v", err)
+		args.Redo++
+		return s.sendMsgWithRedo(args, sub, timeout)
+	}
+	return reply, nil
+}
+
+func (s *Server) sendMsg(args *pb.MsgArgs, sub *subcription, timeout int) (*pb.MsgReply, error) {
+	cli := pb.NewClientClient(sub.clients[args.Name])
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(timeout))
+	defer cancel()
+	return cli.ProcessMsg(ctx, args)
+}
+
+func (s *Server) batchPull(ctx context.Context, args *pb.PullArgs) (*pb.PullReply, error) {
+	reply := &pb.PullReply{}
+	pua := &msg.PullArg{
+		Topic:     args.Topic,
+		Partition: int(args.Partition),
+		Subname:   args.Subscription,
+		Bufsize:   int(args.BufSize),
+	}
+
+	pkey := fmt.Sprintf(partitionKey, pua.Topic, pua.Partition)
+	pNode := s.ps[pkey]
+
+	skey := fmt.Sprintf(subcriptionKey, pua.Topic, pua.Partition, pua.Subname)
+	exSub := s.Sl.Subs[skey]
+
+	go pua.CheckTimeout()
+
+	for {
+		if _, ok := <-pua.Timeout; ok {
+			break
+		}
+		if pNode.pNode.Mnum > exSub.Data.PushOffset || pua.Bufsize <= 0 {
 			pua.Full <- true
 			break
 		}
 
 		pushedNum := 0
 		var msgs []*msg.MsgData
+		exSub.mu.Lock()
 		i := exSub.Data.PushOffset + 1
-		for i <= pNode.Mnum && pushedNum%defaultSendSize < defaultSendSize {
+		for i <= pNode.pNode.Mnum && pushedNum%defaultSendSize < defaultSendSize {
 			if pua.Bufsize <= 0 {
 				pua.Full <- true
 				break
 			}
 			var m *msg.MsgData
 			key := fmt.Sprintf(msgKey, pua.Topic, pua.Partition, i)
-			if en, ok := s.msgs[key]; ok {
-				m = en
+			if en, ok := pNode.msgs.Load(key); ok {
+				m = en.(*msg.MsgData)
 			} else {
 				ms, err := s.GetMsg(pua, i)
 				if err != nil {
@@ -531,15 +618,13 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 			msgs = append(msgs, m)
 			i++
 			pushedNum++
-			if pNode.PushOffset < i {
-				pNode.PushOffset = i
+			if pNode.pNode.PushOffset < i {
+				pNode.pNode.PushOffset = i
 			}
 		}
-		conn, ok := s.conns.Load(args.Name)
-		if !ok {
-			return nil, errors.New("connection does not exist")
-		}
-		c := pb.NewClientClient(conn.(*grpc.ClientConn))
+
+		// batch
+		c := pb.NewClientClient(exSub.clients[args.Name])
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		payload, err := json.Marshal(msgs)
@@ -547,7 +632,8 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 			return reply, err
 		}
 		msgArgs := &pb.MsgArgs{Payload: string(payload)}
-		c.Msg(ctx, msgArgs)
+
+		c.ProcessMsg(ctx, msgArgs)
 		exSub.Data.PushOffset += uint64(len(msgs))
 	}
 	return reply, nil
@@ -563,8 +649,8 @@ func (s *Server) MsgAck(ctx context.Context, args *pb.MsgAckArgs) (*pb.MsgAckRep
 	if exSub.Data.AckOffset > args.AckOffset {
 		exSub.Data.AckOffset = args.AckOffset
 	}
-	if pNode.AckOffset > exSub.Data.AckOffset {
-		pNode.AckOffset = exSub.Data.AckOffset
+	if pNode.pNode.AckOffset > exSub.Data.AckOffset {
+		pNode.pNode.AckOffset = exSub.Data.AckOffset
 	}
 
 	//TODO: retry ?
@@ -633,7 +719,7 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 			return reply, err
 		}
 		if isExists {
-			pNode.PartitionNode, err = s.zkCli.GetPartition(args.Topic, int(args.Partition))
+			pNode.pNode, err = s.zkCli.GetPartition(args.Topic, int(args.Partition))
 			s.partitions.Store(path, pNode)
 		} else {
 			return reply, errors.New("there is no this topic/partition")
@@ -642,7 +728,7 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 
 	pNode.mu.Lock()
 	mData := msg.MsgData{
-		Msid:    pNode.Mnum + 1,
+		Msid:    pNode.pNode.Mnum + 1,
 		Payload: args.Payload,
 	}
 	pa := &msg.PubArg{
@@ -653,7 +739,7 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 	if err := s.PutMsg(pa, mData); err != nil {
 		return reply, err
 	}
-	pNode.Mnum += 1
+	pNode.pNode.Mnum += 1
 	pNode.mu.Unlock()
 	return reply, nil
 }
