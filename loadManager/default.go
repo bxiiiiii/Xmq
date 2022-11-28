@@ -5,11 +5,11 @@ import (
 	"Xmq/config"
 	"Xmq/logger"
 	rc "Xmq/registrationCenter"
+	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/samuel/go-zookeeper/zk"
 )
 
 const (
@@ -20,10 +20,12 @@ const (
 var cbch chan bool
 
 type LoadManager struct {
-	Mu    sync.Mutex
+	mu    sync.Mutex
 	State int
-	BNode rc.BrokerNode
+	bNode *rc.BrokerNode
 
+	preBrokers  map[string]*rc.BrokerNode
+	curBrokers  map[string]*rc.BrokerNode
 	LoadRanking []*rc.BrokerNode
 }
 
@@ -38,43 +40,44 @@ func (lm *LoadManager) Run() {
 	go lm.startLeaderElection()
 }
 
-func callback(e zk.Event) {
-	cbch <- true
-	logger.Debugf("leader watcher is notified to restart LeaderElection")
-}
+// func callback(e zk.Event) {
+// 	cbch <- true
+// 	logger.Debugf("leader watcher is notified to restart LeaderElection")
+// }
 
 func (lm *LoadManager) startLeaderElection() {
-	zkcli, err := rc.NewClientWithCallback(callback)
-	if err != nil {
-		logger.Errorf("NewClientWithCallback failed: %v", err)
-	}
+	// zkcli, err := rc.NewClientWithCallback(callback)
+	// if err != nil {
+	// 	logger.Errorf("NewClientWithCallback failed: %v", err)
+	// }
 
 	for {
-		isExists, err := zkcli.IsLeaderExist()
+		isExists, err := rc.ZkCli.IsLeaderExist()
 		if err != nil {
 			logger.Errorf("IsLeaderExist failed: %v", err)
 		}
 
 		if isExists {
-			if err := zkcli.RegisterWatcher(zkcli.ZkLeaderRoot); err != nil {
+			_, ch, err := rc.ZkCli.RegisterLeadBrokerWatch()
+			if err != nil {
 				logger.Errorf("RegisterWatcher failed: %v", err)
 			}
+			<-ch
 			lm.State = Follower
 
 		} else {
-			if err := rc.ZkCli.RegisterLnode(); err != nil {
+			url := fmt.Sprintf("%v:%v", lm.bNode.Host, lm.bNode.Port)
+			if err := rc.ZkCli.RegisterLeadBrokernode(url); err != nil {
 				logger.Errorf("RegisterLnode failed: %v", err)
-				lm.startLeaderElection()
 			} else {
 				lm.State = Leader
+				go lm.startLeaderTask()
 			}
 		}
-
-		<-cbch
 	}
 }
 
-func (lm *LoadManager) brokerIsTheLeaderNow() {
+func (lm *LoadManager) startLeaderTask() {
 	if config.SrvConf.IsLoadBalancerEnabled {
 		lm.startWatchAllBrokers()
 		lm.pullAllBrokersLoad()
@@ -83,14 +86,35 @@ func (lm *LoadManager) brokerIsTheLeaderNow() {
 
 func (lm *LoadManager) startWatchAllBrokers() {
 	path := rc.ZkCli.ZkBrokerRoot + "/"
-	curBrokers, ch, err := rc.ZkCli.RegisterChildrenWatcher(path)
+	_, ch, err := rc.ZkCli.RegisterChildrenWatcher(path)
 	if err != nil {
 		logger.Errorf("RegisterChildrenWatcher failed: %v", err)
-	}                                                                             
+	}
+	<-ch
+
+	lm.mu.Lock()
+	lm.pullAllBrokersLoad()
+	for name, bnode := range lm.preBrokers {
+		if _, ok := lm.curBrokers[name]; !ok {
+			if err := lm.reallocateBundle(bnode); err != nil {
+				logger.Errorf("reallocateBundle failed: %v", err)
+			}
+		}
+	}
+	lm.preBrokers = lm.curBrokers
+	lm.calculateLoad()
+	lm.mu.Unlock()
 }
 
-func (lm *LoadManager) brokerIsAFollowerNow() {
+func (lm *LoadManager) reallocateBundle(broker *rc.BrokerNode) error {
+	return nil
+}
 
+func (lm *LoadManager) AllocateBundle() (*rc.BrokerNode, error) {
+	if len(lm.LoadRanking) <= 0 {
+		return nil, errors.New("there is no used broker ?")
+	}
+	return lm.LoadRanking[0], nil
 }
 
 func (lm *LoadManager) startCollectLoadData() {
@@ -99,19 +123,15 @@ func (lm *LoadManager) startCollectLoadData() {
 		if err != nil {
 			logger.Errorf("CollectLoadData failed: %v", err)
 		} else {
-			lm.BNode.Load = usage
+			lm.bNode.Load = usage
 		}
 		time.Sleep(time.Second * time.Duration(config.SrvConf.CollectLoadDataInterval))
 	}
 }
 
-func (lm *LoadManager) generateLoadReport() {
-
-}
-
 func (lm *LoadManager) pushLoadReport2registry() {
 	for {
-		if err := rc.ZkCli.UpdateBroker(lm.BNode); err != nil {
+		if err := rc.ZkCli.UpdateBroker(lm.bNode); err != nil {
 			logger.Errorf("UpdateBroker failed: %v", err)
 		}
 		time.Sleep(time.Second * time.Duration(config.SrvConf.PushLoadDataInterval))
@@ -124,10 +144,16 @@ func (lm *LoadManager) pullAllBrokersLoad() error {
 		return err
 	}
 	lm.LoadRanking = brokers
+
+	lm.curBrokers = make(map[string]*rc.BrokerNode)
+	for _, broker := range brokers {
+		lm.curBrokers[broker.Name] = broker
+	}
 	return nil
 }
 
-func (lm *LoadManager) CalculateLoad() {
+func (lm *LoadManager) calculateLoad() {
+	lm.mu.Lock()
 	for _, en := range lm.LoadRanking {
 		en.LoadIndex = lm.calculateMethod(en.Load)
 	}
@@ -135,6 +161,7 @@ func (lm *LoadManager) CalculateLoad() {
 	sort.SliceStable(lm.LoadRanking, func(i, j int) bool {
 		return lm.LoadRanking[i].LoadIndex < lm.LoadRanking[j].LoadIndex
 	})
+	lm.mu.Unlock()
 }
 
 func (lm *LoadManager) calculateMethod(b ct.BrokerUsage) float64 {
