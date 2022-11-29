@@ -89,7 +89,7 @@ type LeaderNode struct {
 }
 
 func init() {
-	ZkCli, _ = NewClient(host, root, 3)
+	ZkCli, _ = NewClient(host, root, config.ZkConf.SessionTimeout)
 	err := ZkCli.ensureExist(ZkCli.ZkRoot)
 	if err != nil {
 		panic(err)
@@ -177,7 +177,7 @@ func (c *ZkClient) RegisterBunode(bunode BundleNode) error {
 	if err != nil {
 		return err
 	}
-	return c.RegisterNode(path, data)
+	return c.registerTemNode(path, data)
 }
 
 func (c *ZkClient) RegisterSnode(snode *SubcriptionNode) error {
@@ -434,6 +434,11 @@ func (c *ZkClient) ensureExist(name string) error {
 	}
 
 	return nil
+}
+
+func (c *ZkClient) IsBrokerExists(name string) (bool, error) {
+	path := fmt.Sprintf(BnodePath, brokerRoot, name)
+	return c.isZnodeExists(path)
 }
 
 func (c *ZkClient) IsTopicExists(topic string) (bool, error) {

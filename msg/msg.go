@@ -29,11 +29,11 @@ type MsgData struct {
 	Payload string
 }
 
-func (pa *PullArg) CheckTimeout() {
+func (pa *PullArg) CheckTimeout(timeout int) {
 	select {
 	case <-pa.Full:
 		return
-	case <-time.After(time.Second * 5):
+	case <-time.After(time.Second * time.Duration(timeout)):
 		pa.Timeout <- true
 	}
 }

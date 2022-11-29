@@ -32,7 +32,15 @@ type LoadManager struct {
 type LoadReport struct {
 }
 
-//func NewLoadManager()
+func NewLoadManager(bNode *rc.BrokerNode) *LoadManager{
+	lm := &LoadManager{
+		State: Follower,
+		bNode: bNode,
+		preBrokers: make(map[string]*rc.BrokerNode),
+		curBrokers: make(map[string]*rc.BrokerNode),
+	}
+	return lm
+}
 
 func (lm *LoadManager) Run() {
 	go lm.startCollectLoadData()
@@ -165,10 +173,10 @@ func (lm *LoadManager) calculateLoad() {
 }
 
 func (lm *LoadManager) calculateMethod(b ct.BrokerUsage) float64 {
-	result := b.Cpu.Usage*config.SrvConf.Lw.Cpu +
-		b.SwapMemory.Usage*config.SrvConf.Lw.SwapMemory +
-		b.VirtualMemory.Usage*config.SrvConf.Lw.VirtualMemory +
-		b.BandwidthIn.Usage*config.SrvConf.Lw.BandwidthIn +
-		b.BandwidthOut.Usage*config.SrvConf.Lw.BandwidthOut
+	result := b.Cpu.Usage*config.SrvConf.CpuWeight +
+		b.SwapMemory.Usage*config.SrvConf.SwapMemoryWeight +
+		b.VirtualMemory.Usage*config.SrvConf.VirtualMemoryWeight +
+		b.BandwidthIn.Usage*config.SrvConf.BandwidthInWeight +
+		b.BandwidthOut.Usage*config.SrvConf.BandwidthOutWeight
 	return result
 }

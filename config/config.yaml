@@ -4,12 +4,19 @@ broker: {
   port: 8889,
   defaultSendSize: 30,
   rpcTimeout: 5,
-  loadWeight: {
-    cpu: 1,
-    memory: 1,
-    bandwidthIn: 1,
-    bandwidthOut: 1,
-  },
+  # load Weight
+  cpuWeight: 1,
+  virtualMemoryWeight: 1,
+  swapMemoryWeight: 1,
+  bandwidthInWeight: 1,
+  bandwidthOutWeight: 1,
+
+  # load Limit
+  cpuLimit: 0.85,
+  virtualMemoryLimit: 0.85,
+  swapMemoryLimit: 0.85,
+  bandwidthInLimit: ,
+  bandwidthOutLimit: ,
 
   syncWrite2disk: true,
   asyncWriteMsglimit: 10,
@@ -19,6 +26,7 @@ broker: {
   pushLoadDataInterval: 6,
 
   defaultNumberOfBundles: 16,
+  defaultMaxAddress: 16,
 
   brokerDeduplicationEnabled: false,
 
@@ -29,9 +37,7 @@ broker: {
 }
 
 zookeeper: {
-  host: {
-
-  },
+  host: ["127.0.0.1:2181"],
   root: "/Xmq",
   brokerRoot: /"Xmq/broker",
   topicRoot: "/Xmq/topic",
@@ -40,8 +46,6 @@ zookeeper: {
 }
 
 etcd: {
-  Endpoints: {
-
-  },
+  Endpoints: ["127.0.0.1:2379"],
   DialTimeout: 3,
 }
