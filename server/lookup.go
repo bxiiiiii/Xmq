@@ -12,6 +12,7 @@ import (
 )
 
 func (s *Server) LookUp(ctx context.Context, args *pb.LookUpArgs) (*pb.LookUpReply, error) {
+	logger.Infof("Receive LookUp rq from %v", args)
 	reply := &pb.LookUpReply{}
 	path := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
 	bundleID, err := s.bundles.GetBundle(path)
@@ -35,6 +36,7 @@ func (s *Server) LookUp(ctx context.Context, args *pb.LookUpArgs) (*pb.LookUpRep
 		return reply, errors.New("need to connect leader to alloc")
 	}
 	reply.Url = s.bundles.Bundles[bundleID].Info.BrokerUrl
+	logger.Debugf("LookUp reply: %v", reply)
 	return reply, nil
 }
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"Xmq/bundle"
+	ct "Xmq/collect"
 	"Xmq/config"
 	"Xmq/logger"
 	"Xmq/msg"
@@ -22,40 +23,30 @@ import (
 	pb "Xmq/proto"
 
 	"github.com/samuel/go-zookeeper/zk"
-	"github.com/spf13/viper"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-type ServerInfo struct {
-	ServerName string
-	Version    string
-	Host       string
-	Port       int
-	MaxPayload int
-}
-
 type Server struct {
-	Info       ServerInfo
+	Info       *rc.BrokerNode
 	Running    bool
 	Sl         *sublist
 	ps         map[string]*partitionData
 	partitions sync.Map
 
-	gcid    uint64
-	zkCli   *rc.ZkClient //TODO: create
+	gcid    uint64 // deprecate
 	kv      clientv3.KV
-	bundles bundle.Bundles //TODO: create
+	bundles *bundle.Bundles
 
 	grpcServer *grpc.Server
 	conns      sync.Map
 
-	bundle2broker map[bundle.BundleInfo]ServerInfo
+	// bundle2broker map[bundle.BundleInfo]rc.BrokerNode
+
+	loadManager *lm.LoadManager
 
 	pb.UnimplementedServerServer
-
-	loadManager lm.LoadManager
 }
 
 type partitionData struct {
@@ -89,32 +80,49 @@ var defaultSendSize int
 func NewServerFromConfig() *Server {
 	s := &Server{
 		ps: make(map[string]*partitionData),
+		kv: clientv3.NewKV(persist.EtcdCli),
+		// bundle2broker: make(map[bundle.BundleInfo]rc.BrokerNode),
 	}
-	info := ServerInfo{
-		ServerName: viper.GetString("broker.name"),
-		Host:       viper.GetString("broker.host"),
-		Port:       viper.GetInt("broker.port"),
+	s.Info = &rc.BrokerNode{
+		Name:      config.SrvConf.Name,
+		Host:      config.SrvConf.Host,
+		Port:      config.SrvConf.Port,
+		Pnum:      0,
+		LoadIndex: 0,
 	}
-	s.Info = info
 
-	defaultSendSize = viper.GetInt("broker.defaultSendSize")
+	s.Info.Load.Cpu.Limit = config.SrvConf.CpuLimit
+	s.Info.Load.VirtualMemory.Limit = config.SrvConf.VirtualMemoryLimit
+	s.Info.Load.SwapMemory.Limit = config.SrvConf.SwapMemoryLimit
+	s.Info.Load.BandwidthIn.Limit = config.SrvConf.BandwidthInLimit
+	s.Info.Load.BandwidthOut.Limit = config.SrvConf.BandwidthOutLimit
 
 	s.grpcServer = grpc.NewServer()
 
+	s.loadManager = lm.NewLoadManager(s.Info)
 	return s
 }
 
-func (s *Server) Online() error {
-	bNode := rc.BrokerNode{
-		Name: config.SrvConf.Name,
-		Host: config.SrvConf.Host,
-		Port: config.SrvConf.Port,
-		Pnum: 0,
-		// Load: load,
-		LoadIndex: 0,
-	}
-	if err := rc.ZkCli.RegisterBnode(bNode); err != nil {
+func (s *Server) Online() (err error) {
+	isExists, err := rc.ZkCli.IsBrokerExists(s.Info.Name)
+	if err != nil {
 		return err
+	}
+	if isExists {
+		return logger.Errorf("there is a exist broker %v", s.Info.Name)
+	}
+
+	s.Info.Load, err = ct.CollectLoadData()
+	if err != nil {
+		return logger.Errorf("CollectLoadData failed: %v", err)
+	}
+	if err := rc.ZkCli.RegisterBnode(*s.Info); err != nil {
+		return err
+	}
+
+	s.bundles, err = bundle.NewBundles()
+	if err != nil {
+		return logger.Errorf("NewBundles failed: %v", err)
 	}
 
 	s.loadManager.Run()
@@ -127,9 +135,9 @@ func (s *Server) RunWithGrpc() {
 	if err != nil {
 		panic(logger.Errorf("failed to listen: %v", err))
 	}
-	logger.Debugf("server listening at %v", listener.Addr())
+	logger.Infof("server listening at %v", listener.Addr())
 
-	pb.RegisterServerServer(s.grpcServer, &Server{})
+	pb.RegisterServerServer(s.grpcServer, s)
 	if err := s.grpcServer.Serve(listener); err != nil {
 		logger.Warnf("failed to serve: %v", err)
 	}
@@ -138,17 +146,6 @@ func (s *Server) RunWithGrpc() {
 func (s *Server) ShutDown() {
 	s.grpcServer.GracefulStop()
 	// notify registry
-}
-
-func NewServer(si ServerInfo) *Server {
-	grpc.NewServer()
-	s := &Server{
-		Info:    si,
-		Running: false,
-		Sl:      NewSublist(),
-		kv:      clientv3.NewKV(persist.EtcdCli),
-	}
-	return s
 }
 
 func (s *Server) Run() {
@@ -255,6 +252,7 @@ func (s *Server) get(key string) ([]byte, error) {
 }
 
 func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.ConnectReply, error) {
+	logger.Infof("Receive Connect rq from %v", args)
 	reply := &pb.ConnectReply{}
 	conn, err := grpc.Dial(args.Url, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -359,13 +357,13 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 	if sub, ok := s.Sl.Subs[key]; ok {
 		exSub = sub
 	} else {
-		isExists, err := s.zkCli.IsSubcriptionExist(snode)
+		isExists, err := rc.ZkCli.IsSubcriptionExist(snode)
 		if err != nil {
 			reply.Error = err.Error()
 			return reply, err
 		}
 		if isExists {
-			existSnode, err := s.zkCli.GetSub(snode)
+			existSnode, err := rc.ZkCli.GetSub(snode)
 			if err != nil {
 				reply.Error = err.Error()
 				return reply, err
@@ -394,7 +392,6 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 			if len(exSub.Data.Subers) == 0 {
 				conn, _ := s.conns.LoadAndDelete(args.Name)
 				exSub.Data.Subers[args.Name] = args.Name
-				// exSub.Clients[args.Name] = c
 				exSub.clients[args.Name] = conn.(*grpc.ClientConn)
 
 				if err := s.PutSubcription(exSub); err != nil {
@@ -438,7 +435,7 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 			//TODO: need some extra action
 		}
 	} else {
-		if err := s.zkCli.RegisterSnode(snode); err != nil {
+		if err := rc.ZkCli.RegisterSnode(snode); err != nil {
 			logger.Errorf("RegisterSnode failed: %v", err)
 			return reply, errors.New("404")
 		}
@@ -493,7 +490,7 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 	skey := fmt.Sprintf(subcriptionKey, pua.Topic, pua.Partition, pua.Subname)
 	exSub := s.Sl.Subs[skey]
 
-	go pua.CheckTimeout()
+	go pua.CheckTimeout(int(args.Timeout))
 
 	for {
 		if _, ok := <-pua.Timeout; ok {
@@ -583,7 +580,7 @@ func (s *Server) batchPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRepl
 	skey := fmt.Sprintf(subcriptionKey, pua.Topic, pua.Partition, pua.Subname)
 	exSub := s.Sl.Subs[skey]
 
-	go pua.CheckTimeout()
+	go pua.CheckTimeout(int(args.Timeout))
 
 	for {
 		if _, ok := <-pua.Timeout; ok {
@@ -674,12 +671,12 @@ func (s *Server) ProcessUnsub(ctx context.Context, args *pb.UnSubscribeArgs) (*p
 	if sub, ok := s.Sl.Subs[key]; ok {
 		exSub = sub
 	} else {
-		isExists, err := s.zkCli.IsSubcriptionExist(&sub.Data.Meta)
+		isExists, err := rc.ZkCli.IsSubcriptionExist(&sub.Data.Meta)
 		if err != nil {
 			return nil, err
 		}
 		if isExists {
-			existSnode, err := s.zkCli.GetSub(&sub.Data.Meta)
+			existSnode, err := rc.ZkCli.GetSub(&sub.Data.Meta)
 			if err != nil {
 				return nil, err
 			}
@@ -708,18 +705,19 @@ func (s *Server) ProcessUnsub(ctx context.Context, args *pb.UnSubscribeArgs) (*p
 }
 
 func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.PublishReply, error) {
+	logger.Infof("Receive Publish rq from %v", args)
 	reply := &pb.PublishReply{}
 	var pNode *partitionData
 	path := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
 	if v, ok := s.partitions.Load(path); ok {
 		pNode = v.(*partitionData)
 	} else {
-		isExists, err := s.zkCli.IsPartitionExists(args.Topic, int(args.Partition))
+		isExists, err := rc.ZkCli.IsPartitionExists(args.Topic, int(args.Partition))
 		if err != nil {
 			return reply, err
 		}
 		if isExists {
-			pNode.pNode, err = s.zkCli.GetPartition(args.Topic, int(args.Partition))
+			pNode.pNode, err = rc.ZkCli.GetPartition(args.Topic, int(args.Partition))
 			s.partitions.Store(path, pNode)
 		} else {
 			return reply, errors.New("there is no this topic/partition")

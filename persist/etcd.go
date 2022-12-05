@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"Xmq/config"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -8,10 +9,10 @@ import (
 
 var EtcdCli *clientv3.Client
 
-func init() {
+func PersistInit() {
 	config := clientv3.Config{
-		Endpoints:   []string{"localhost:2379"},
-		DialTimeout: 5 * time.Second,
+		Endpoints:   config.EConf.Endpoints,
+		DialTimeout: time.Duration(config.EConf.DialTimeout) * time.Second,
 	}
 	var err error
 	EtcdCli, err = clientv3.New(config)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"Xmq/config"
+	"Xmq/logger"
 
 	ct "Xmq/collect"
 
@@ -15,15 +16,6 @@ import (
 )
 
 var ZkCli *ZkClient
-
-var (
-	host       = []string{"localhost:2181"}
-	root       = "/Xmq"
-	brokerRoot = root + "/broker"
-	topicRoot  = root + "/topic"
-	bundleRoot = root + "/bundle"
-	leaderPath = root + "/leader"
-)
 
 var (
 	BnodePath     = "%v/%v"               // BrokerRoot/BrokerName
@@ -36,13 +28,14 @@ var (
 )
 
 type ZkClient struct {
-	ZkServers    []string
-	ZkRoot       string
-	ZkBrokerRoot string
-	ZkTopicRoot  string
-	ZkBundleRoot string
-	ZkLeaderRoot string
-	Conn         *zk.Conn
+	ZkServers      []string
+	ZkRoot         string
+	ZkBrokerRoot   string
+	ZkTopicRoot    string
+	ZkBundleRoot   string
+	LeadBrokerPath string
+	SessionTimeout int
+	Conn           *zk.Conn
 }
 
 type BrokerNode struct {
@@ -50,6 +43,7 @@ type BrokerNode struct {
 	Host      string `json:"host"`
 	Port      int    `json:"port"`
 	Pnum      int    `json:"pnum"`
+	Version   int32
 	Load      ct.BrokerUsage
 	LoadIndex float64
 }
@@ -67,7 +61,7 @@ type PartitionNode struct {
 	AckOffset  uint64 `json:"ackoffset"`
 	PushOffset uint64 `json:"pushoffset"`
 	Url        string
-	// Version    int32
+	Version    int32
 }
 
 type BundleNode struct {
@@ -75,6 +69,7 @@ type BundleNode struct {
 	Start     uint32
 	End       uint32
 	BrokerUrl string
+	Version   int32
 }
 
 type SubcriptionNode struct {
@@ -88,21 +83,26 @@ type LeaderNode struct {
 	LeaderUrl string
 }
 
-func init() {
-	ZkCli, _ = NewClient(host, root, config.ZkConf.SessionTimeout)
-	err := ZkCli.ensureExist(ZkCli.ZkRoot)
+func RcInit() {
+	ZkCli, _ = NewClient()
+	ZkCli.preRoot()
+	logger.Infoln("zk init over")
+}
+
+func (c *ZkClient) preRoot() {
+	err := c.ensureExist(c.ZkRoot)
 	if err != nil {
 		panic(err)
 	}
-	err = ZkCli.ensureExist(ZkCli.ZkBrokerRoot)
+	err = c.ensureExist(c.ZkBrokerRoot)
 	if err != nil {
 		panic(err)
 	}
-	err = ZkCli.ensureExist(ZkCli.ZkTopicRoot)
+	err = c.ensureExist(c.ZkTopicRoot)
 	if err != nil {
 		panic(err)
 	}
-	err = ZkCli.ensureExist(ZkCli.ZkBundleRoot)
+	err = c.ensureExist(c.ZkBundleRoot)
 	if err != nil {
 		panic(err)
 	}
@@ -110,17 +110,18 @@ func init() {
 
 func callback(e zk.Event) {}
 
-func NewClient(zkServers []string, zkRoot string, timeout int) (*ZkClient, error) {
+func NewClient() (*ZkClient, error) {
 	c := &ZkClient{
-		//todo: get from config
+		ZkServers:      config.ZkConf.Host,
+		ZkRoot:         config.ZkConf.Root,
+		ZkBrokerRoot:   config.ZkConf.BrokerRoot,
+		ZkTopicRoot:    config.ZkConf.TopicRoot,
+		ZkBundleRoot:   config.ZkConf.BundleRoot,
+		LeadBrokerPath: config.ZkConf.LeadBrokerRoot,
+		SessionTimeout: config.ZkConf.SessionTimeout,
 	}
-	c.ZkRoot = zkRoot
-	c.ZkServers = zkServers
-	c.ZkBrokerRoot = brokerRoot
-	c.ZkTopicRoot = topicRoot
-	c.ZkBundleRoot = bundleRoot
 
-	Conn, _, err := zk.Connect(zkServers, time.Duration(timeout)*time.Second)
+	Conn, _, err := zk.Connect(c.ZkServers, time.Duration(c.SessionTimeout)*time.Second)
 	if err != nil {
 		panic("connect zk failed.")
 	}
@@ -131,10 +132,16 @@ func NewClient(zkServers []string, zkRoot string, timeout int) (*ZkClient, error
 
 func NewClientWithCallback(cb func(e zk.Event)) (*ZkClient, error) {
 	c := &ZkClient{
-		//todo: get from config
+		ZkServers:      config.ZkConf.Host,
+		ZkRoot:         config.ZkConf.Root,
+		ZkBrokerRoot:   config.ZkConf.BrokerRoot,
+		ZkTopicRoot:    config.ZkConf.TopicRoot,
+		ZkBundleRoot:   config.ZkConf.BundleRoot,
+		SessionTimeout: config.ZkConf.SessionTimeout,
 	}
+
 	eventCallbackOption := zk.WithEventCallback(cb)
-	conn, _, err := zk.Connect(host, time.Second*time.Duration(config.ZkConf.SessionTimeout), eventCallbackOption)
+	conn, _, err := zk.Connect(c.ZkServers, time.Second*time.Duration(config.ZkConf.SessionTimeout), eventCallbackOption)
 	if err != nil {
 		return nil, err
 	}
@@ -149,8 +156,8 @@ func (c *ZkClient) RegisterBnode(bnode BrokerNode) error {
 	if err != nil {
 		return err
 	}
-	// TODO: create temporary node
-	return c.RegisterNode(path, data)
+
+	return c.registerTemNode(path, data)
 }
 
 func (c *ZkClient) RegisterTnode(tnode TopicNode) error {
@@ -171,13 +178,13 @@ func (c *ZkClient) RegisterPnode(pnode PartitionNode) error {
 	return c.RegisterNode(path, data)
 }
 
-func (c *ZkClient) RegisterBunode(bunode BundleNode) error {
+func (c *ZkClient) RegisterBunode(bunode *BundleNode) error {
 	path := fmt.Sprintf(BunodePath, c.ZkBundleRoot, bunode.ID)
 	data, err := json.Marshal(bunode)
 	if err != nil {
 		return err
 	}
-	return c.registerTemNode(path, data)
+	return c.RegisterNode(path, data)
 }
 
 func (c *ZkClient) RegisterSnode(snode *SubcriptionNode) error {
@@ -200,7 +207,7 @@ func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscripti
 }
 
 func (c *ZkClient) RegisterLeadBrokernode(url string) error {
-	return c.registerTemNode(leaderPath, []byte(url))
+	return c.registerTemNode(c.LeadBrokerPath, []byte(url))
 }
 
 func (c *ZkClient) RegisterNode(path string, data []byte) error {
@@ -210,13 +217,13 @@ func (c *ZkClient) RegisterNode(path string, data []byte) error {
 
 func (c *ZkClient) registerTemNode(path string, data []byte) error {
 	//todo: choose one?
-	// _, err := c.Conn.CreateProtectedEphemeralSequential(path, data, zk.AuthACL(zk.PermAll))
-	_, err := c.Conn.Create(path, data, zk.FlagEphemeral, zk.AuthACL(zk.PermAll))
+	// _, err := c.Conn.CreateProtectedEphemeralSequential(path, data, zk.WorldACL(zk.PermAll))
+	_, err := c.Conn.Create(path, data, zk.FlagEphemeral, zk.WorldACL(zk.PermAll))
 	return err
 }
 
 func (c *ZkClient) RegisterLeadBrokerWatch() (bool, <-chan zk.Event, error) {
-	return c.registerWatcher(leaderPath)
+	return c.registerWatcher(c.LeadBrokerPath)
 }
 
 func (c *ZkClient) RegisterLeadPuberWatch(topic string, partition int) (bool, <-chan zk.Event, error) {
@@ -364,7 +371,7 @@ func (c *ZkClient) GetBundle(id int) (*BundleNode, error) {
 }
 
 func (c *ZkClient) GetLeader() (*LeaderNode, error) {
-	data, _, err := c.Conn.Get(leaderPath)
+	data, _, err := c.Conn.Get(c.LeadBrokerPath)
 	if err != nil {
 		return nil, err
 	}
@@ -378,13 +385,13 @@ func (c *ZkClient) GetLeader() (*LeaderNode, error) {
 
 func (c *ZkClient) GetAllBrokers() ([]*BrokerNode, error) {
 	var brokers []*BrokerNode
-	znodes, _, err := c.Conn.Children(brokerRoot)
+	znodes, _, err := c.Conn.Children(c.ZkBrokerRoot)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, znode := range znodes {
-		bPath := brokerRoot + "/" + znode
+		bPath := c.ZkBrokerRoot + "/" + znode
 		data, _, err := c.Conn.Get(bPath)
 		if err != nil {
 			return nil, err
@@ -423,7 +430,7 @@ func (c *ZkClient) IsSubersExists(topic string, partition int, subscription stri
 
 func (c *ZkClient) ensureExist(name string) error {
 	isExists, _, err := c.Conn.Exists(name)
-	if err != nil {
+	if err != nil && err != zk.ErrNoNode {
 		return err
 	}
 	if !isExists {
@@ -437,7 +444,7 @@ func (c *ZkClient) ensureExist(name string) error {
 }
 
 func (c *ZkClient) IsBrokerExists(name string) (bool, error) {
-	path := fmt.Sprintf(BnodePath, brokerRoot, name)
+	path := fmt.Sprintf(BnodePath, c.ZkBrokerRoot, name)
 	return c.isZnodeExists(path)
 }
 
@@ -465,7 +472,7 @@ func (c *ZkClient) IsSubcriptionExist(snode *SubcriptionNode) (bool, error) {
 }
 
 func (c *ZkClient) IsLeaderExist() (bool, error) {
-	return c.isZnodeExists(leaderPath)
+	return c.isZnodeExists(c.LeadBrokerPath)
 }
 
 func (c *ZkClient) isZnodeExists(path string) (bool, error) {
@@ -510,8 +517,9 @@ func (c *ZkClient) UpdatePartition(pNode *PartitionNode) error {
 	if err != nil {
 		return err
 	}
-	//TODO: version 0?
-	_, err = c.Conn.Set(path, data, 0)
+
+	_, err = c.Conn.Set(path, data, pNode.Version)
+	pNode.Version++
 	return err
 }
 
@@ -521,7 +529,8 @@ func (c *ZkClient) UpdateBroker(bNode *BrokerNode) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.Conn.Set(path, data, 0)
+	_, err = c.Conn.Set(path, data, bNode.Version)
+	bNode.Version++
 	return err
 }
 
@@ -531,6 +540,11 @@ func (c *ZkClient) UpdateBundle(buNode *BundleNode) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.Conn.Set(path, data, 0)
+	_, err = c.Conn.Set(path, data, buNode.Version)
+	buNode.Version++
 	return err
+}
+
+func (c *ZkClient) Close() {
+	c.Conn.Close()
 }

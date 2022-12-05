@@ -39,7 +39,7 @@ func NewBundle(id int) (*Bundle, error) {
 		Start: uint32Shard*uint32(id) - uint32Shard,
 	}
 	b := &Bundle{Info: info}
-	if err := rc.ZkCli.RegisterBunode(*info); err != nil {
+	if err := rc.ZkCli.RegisterBunode(info); err != nil {
 		return nil, err
 	}
 	return b, nil
