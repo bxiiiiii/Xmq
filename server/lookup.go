@@ -36,11 +36,12 @@ func (s *Server) LookUp(ctx context.Context, args *pb.LookUpArgs) (*pb.LookUpRep
 		return reply, errors.New("need to connect leader to alloc")
 	}
 	reply.Url = s.bundles.Bundles[bundleID].Info.BrokerUrl
-	logger.Debugf("LookUp reply: %v", reply)
+	logger.Infof("LookUp reply: %v", reply)
 	return reply, nil
 }
 
 func (s *Server) RequestAlloc(ctx context.Context, args *pb.RequestAllocArgs) (*pb.RequestAllocReply, error) {
+	logger.Infof("Receive Alloc rq from %v", args)
 	reply := &pb.RequestAllocReply{}
 	if s.loadManager.State != lm.Leader {
 		lNode, err := rc.ZkCli.GetLeader()
@@ -60,15 +61,18 @@ func (s *Server) RequestAlloc(ctx context.Context, args *pb.RequestAllocArgs) (*
 	}
 
 	var buNode *rc.BundleNode
-	if _, ok := s.bundles.Bundles[bundleID]; !ok {
+	if b, ok := s.bundles.Bundles[bundleID]; !ok {
 		buNode, err = rc.ZkCli.GetBundle(bundleID)
 		if err != nil {
 			return nil, err
 		}
 		s.bundles.Bundles[bundleID] = &bundle.Bundle{Info: buNode}
+	} else {
+		buNode = b.Info
 	}
 
 	bNode, err := s.loadManager.AllocateBundle()
+
 	buNode.BrokerUrl = fmt.Sprintf("%v:%v", bNode.Host, bNode.Port)
 	if err := rc.ZkCli.UpdateBundle(buNode); err != nil {
 		logger.Errorf("UpdateBundle failed: %v", err)

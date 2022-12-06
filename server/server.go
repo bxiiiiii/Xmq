@@ -56,9 +56,9 @@ type partitionData struct {
 }
 
 const (
-	subcriptionKey = "%s/p%d/%s" // topic/partition/subcriptionName
-	msgKey         = "%s/p%d/%d" // topic/partition/msid
-	partitionKey   = "%s/p%d"    //topic/partition
+	subcriptionKey = "/%s/p%d/%s" // topic/partition/subcriptionName
+	msgKey         = "/%s/p%d/%d" // topic/partition/msid
+	partitionKey   = "/%s/p%d"    //topic/partition
 )
 
 // subscribe/publish mode
@@ -70,8 +70,17 @@ const (
 	Key_Shared // sub only
 )
 
+type PublishMode int32
+
+const (
+	PMode_Exclusive     PublishMode = 0
+	PMode_WaitExclusive PublishMode = 1
+	PMode_Shared        PublishMode = 2
+)
+
 const (
 	Puber = iota
+	PartPuber
 	Suber
 )
 
@@ -122,7 +131,7 @@ func (s *Server) Online() (err error) {
 
 	s.bundles, err = bundle.NewBundles()
 	if err != nil {
-		return logger.Errorf("NewBundles failed: %v", err)
+		panic(logger.Errorf("NewBundles failed: %v", err))
 	}
 
 	s.loadManager.Run()
@@ -190,13 +199,13 @@ func (s *Server) createClient(conn net.Conn) *client {
 
 // 	return err
 // }
-func (s *Server) PutMsg(m *msg.PubArg, mData msg.MsgData) error {
-	key := fmt.Sprintf(msgKey, m.Topic, m.Partition, m.Mid)
+func (s *Server) PutMsg(m *msg.PubArg, mData msg.MsgData) (string, error) {
+	key := fmt.Sprintf(msgKey, m.Topic, m.Partition, mData.Msid)
 	data, err := json.Marshal(mData)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return s.put(key, data)
+	return key, s.put(key, data)
 }
 
 func (s *Server) PutSubcription(sub *subcription) error {
@@ -248,6 +257,9 @@ func (s *Server) get(key string) ([]byte, error) {
 		return nil, err
 	}
 	//TODO: resp.Count
+	if len(resp.Kvs) <= 0 {
+		return nil, errors.New(fmt.Sprintf("key: %v not has value", key))
+	}
 	return resp.Kvs[0].Value, nil
 }
 
@@ -261,37 +273,69 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 
 	preName := fmt.Sprintf(rc.PnodePath, rc.ZkCli.ZkTopicRoot, args.Topic, args.Partition)
 	switch args.Type {
-	case Puber:
+	case Puber, PartPuber:
 		preName = preName + "-publisher-" + args.Name
 		tNode, err := rc.ZkCli.GetTopic(args.Topic)
 		if err != nil {
-			logger.Errorf("GetTopic failed: %v")
-			conn.Close()
-			return reply, errors.New("404")
-		}
-		switch tNode.PulishMode {
-		case Exclusive:
-			isExists, err := rc.ZkCli.IsPubersExists(args.Topic, int(args.Partition))
-			if err != nil {
-				logger.Errorf("IsPubersExists failed: %v")
+			if err == zk.ErrNoNode {
+				topicNode := &rc.TopicNode{
+					Name:       args.Topic,
+					Pnum:       int(args.PartitionNum),
+					PulishMode: int(args.PubMode),
+				}
+				if err := s.registerTopic(topicNode); err != nil {
+					logger.Errorf("registerTopic failed: %v", err)
+					conn.Close()
+					return reply, errors.New("404")
+				} else {
+					tNode = topicNode
+				}
+			} else {
+				logger.Errorf("GetTopic failed: %v", err)
 				conn.Close()
 				return reply, errors.New("404")
 			}
+		}
+
+		pNode := &rc.PartitionNode{
+			ID:         int(args.Partition),
+			TopicName:  args.Topic,
+			Mnum:       0,
+			AckOffset:  0,
+			PushOffset: 0,
+			Version:    0,
+			// Url: ,
+		}
+		if err := rc.ZkCli.RegisterPnode(pNode); err != nil && err != zk.ErrNodeExists {
+			logger.Errorf("RegisterPnode failed: %v", err)
+			conn.Close()
+			return reply, errors.New("404")
+		}
+
+		switch PublishMode(tNode.PulishMode) {
+		case PMode_Exclusive:
+			isExists, err := rc.ZkCli.IsPubersExists(args.Topic, int(args.Partition))
+			if err != nil {
+				logger.Errorf("IsPubersExists failed: %v", err)
+				conn.Close()
+				return reply, errors.New("404")
+			}
+
 			if isExists {
 				logger.Debugf("This Exclusive topic already has a puber")
 				conn.Close()
 				return reply, errors.New("This Exclusive topic already has a puber")
 			} else {
 				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition)); err != nil {
-					logger.Errorf("RegisterLeadPuberNode failed: %v")
+					logger.Errorf("RegisterLeadPuberNode failed: %v", err)
 					conn.Close()
 					return reply, errors.New("404")
 				}
 			}
-		case WaitExclusive:
+		case PMode_WaitExclusive:
 			isExists, err := rc.ZkCli.IsPubersExists(args.Topic, int(args.Partition))
 			if err != nil {
-				logger.Errorf("IsPubersExists failed: %v")
+				logger.Errorf("IsPubersExists failed: %v", err)
 				conn.Close()
 				return reply, errors.New("404")
 			}
@@ -302,11 +346,12 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 				}
 			} else {
 				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition)); err != nil {
-					logger.Errorf("RegisterLeadPuberNode failed: %v")
+					logger.Errorf("RegisterLeadPuberNode failed: %v", err)
 					conn.Close()
 					return reply, errors.New("404")
 				}
 			}
+			// case PMode_Shared:
 		}
 	case Suber:
 		preName = preName + "-subscriber-" + args.Name
@@ -331,6 +376,14 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 		return reply, errors.New("Automatically rename")
 	}
 	return reply, nil
+}
+
+func (s *Server) registerTopic(tNode *rc.TopicNode) error {
+	if err := rc.ZkCli.RegisterTnode(tNode); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (c *client) waitcallback(ch <-chan zk.Event) {
@@ -405,7 +458,7 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 		case Failover:
 			isExists, err := rc.ZkCli.IsSubersExists(args.Topic, int(args.Partition), args.Name)
 			if err != nil {
-				logger.Errorf("IsSubersExists failed: %v")
+				logger.Errorf("IsSubersExists failed: %v", err)
 				//todo: close conn
 				return reply, errors.New("404")
 			}
@@ -416,7 +469,7 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 				}
 			} else {
 				if err := rc.ZkCli.RegisterLeadSuberNode(args.Topic, int(args.Partition), args.Subscription); err != nil {
-					logger.Errorf("RegisterLeadSuberNode failed: %v")
+					logger.Errorf("RegisterLeadSuberNode failed: %v", err)
 					// conn.Close()
 					return reply, errors.New("404")
 				}
@@ -734,10 +787,14 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 		Partition: int(args.Partition),
 		Mid:       args.Mid,
 	}
-	if err := s.PutMsg(pa, mData); err != nil {
+	if _, err := s.PutMsg(pa, mData); err != nil {
 		return reply, err
 	}
 	pNode.pNode.Mnum += 1
+	if err := rc.ZkCli.UpdatePartition(pNode.pNode); err != nil {
+		return reply, err
+	}
+	logger.Infof("persist a message: %v %v", pa, mData)
 	pNode.mu.Unlock()
 	return reply, nil
 }

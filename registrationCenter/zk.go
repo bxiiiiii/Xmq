@@ -160,7 +160,7 @@ func (c *ZkClient) RegisterBnode(bnode BrokerNode) error {
 	return c.registerTemNode(path, data)
 }
 
-func (c *ZkClient) RegisterTnode(tnode TopicNode) error {
+func (c *ZkClient) RegisterTnode(tnode *TopicNode) error {
 	path := fmt.Sprintf(TnodePath, c.ZkTopicRoot, tnode.Name)
 	data, err := json.Marshal(tnode)
 	if err != nil {
@@ -169,7 +169,7 @@ func (c *ZkClient) RegisterTnode(tnode TopicNode) error {
 	return c.RegisterNode(path, data)
 }
 
-func (c *ZkClient) RegisterPnode(pnode PartitionNode) error {
+func (c *ZkClient) RegisterPnode(pnode *PartitionNode) error {
 	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, pnode.TopicName, pnode.ID)
 	data, err := json.Marshal(pnode)
 	if err != nil {
@@ -198,7 +198,7 @@ func (c *ZkClient) RegisterSnode(snode *SubcriptionNode) error {
 
 func (c *ZkClient) RegisterLeadPuberNode(topic string, partition int) error {
 	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, topic, partition)
-	return c.registerTemNode(path, []byte{65})
+	return c.RegisterNode(path, []byte{65})
 }
 
 func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscription string) error {
@@ -206,8 +206,12 @@ func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscripti
 	return c.registerTemNode(path, []byte{65})
 }
 
-func (c *ZkClient) RegisterLeadBrokernode(url string) error {
-	return c.registerTemNode(c.LeadBrokerPath, []byte(url))
+func (c *ZkClient) RegisterLeadBrokernode(lNode *LeaderNode) error {
+	data, err := json.Marshal(lNode)
+	if err != nil {
+		return err
+	}
+	return c.registerTemNode(c.LeadBrokerPath, data)
 }
 
 func (c *ZkClient) RegisterNode(path string, data []byte) error {
@@ -357,7 +361,7 @@ func (c *ZkClient) GetBundles(bnum int) ([]*BundleNode, error) {
 }
 
 func (c *ZkClient) GetBundle(id int) (*BundleNode, error) {
-	path := fmt.Sprintf(BunodePath, id)
+	path := fmt.Sprintf(BunodePath, config.ZkConf.BundleRoot, id)
 	data, _, err := c.Conn.Get(path)
 	if err != nil {
 		return nil, err

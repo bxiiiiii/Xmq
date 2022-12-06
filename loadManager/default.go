@@ -32,10 +32,10 @@ type LoadManager struct {
 type LoadReport struct {
 }
 
-func NewLoadManager(bNode *rc.BrokerNode) *LoadManager{
+func NewLoadManager(bNode *rc.BrokerNode) *LoadManager {
 	lm := &LoadManager{
-		State: Follower,
-		bNode: bNode,
+		State:      Follower,
+		bNode:      bNode,
 		preBrokers: make(map[string]*rc.BrokerNode),
 		curBrokers: make(map[string]*rc.BrokerNode),
 	}
@@ -75,11 +75,12 @@ func (lm *LoadManager) startLeaderElection() {
 
 		} else {
 			url := fmt.Sprintf("%v:%v", lm.bNode.Host, lm.bNode.Port)
-			if err := rc.ZkCli.RegisterLeadBrokernode(url); err != nil {
+			lNode := &rc.LeaderNode{LeaderUrl: url}
+			if err := rc.ZkCli.RegisterLeadBrokernode(lNode); err != nil {
 				logger.Errorf("RegisterLnode failed: %v", err)
 			} else {
 				lm.State = Leader
-				go lm.startLeaderTask()
+				lm.startLeaderTask()
 			}
 		}
 	}
@@ -87,8 +88,8 @@ func (lm *LoadManager) startLeaderElection() {
 
 func (lm *LoadManager) startLeaderTask() {
 	if config.SrvConf.IsLoadBalancerEnabled {
-		lm.startWatchAllBrokers()
-		lm.pullAllBrokersLoad()
+		go lm.startWatchAllBrokers()
+		go lm.pullAllBrokersLoad()
 	}
 }
 
@@ -110,7 +111,6 @@ func (lm *LoadManager) startWatchAllBrokers() {
 		}
 	}
 	lm.preBrokers = lm.curBrokers
-	lm.calculateLoad()
 	lm.mu.Unlock()
 }
 
@@ -158,11 +158,12 @@ func (lm *LoadManager) pullAllBrokersLoad() error {
 	for _, broker := range brokers {
 		lm.curBrokers[broker.Name] = broker
 	}
+	lm.calculateLoad()
 	return nil
 }
 
 func (lm *LoadManager) calculateLoad() {
-	lm.mu.Lock()
+	//lm.mu.Lock()
 	for _, en := range lm.LoadRanking {
 		en.LoadIndex = lm.calculateMethod(en.Load)
 	}
@@ -170,7 +171,7 @@ func (lm *LoadManager) calculateLoad() {
 	sort.SliceStable(lm.LoadRanking, func(i, j int) bool {
 		return lm.LoadRanking[i].LoadIndex < lm.LoadRanking[j].LoadIndex
 	})
-	lm.mu.Unlock()
+	//lm.mu.Unlock()
 }
 
 func (lm *LoadManager) calculateMethod(b ct.BrokerUsage) float64 {

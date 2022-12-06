@@ -4,6 +4,7 @@ import (
 	"Xmq/config"
 	rc "Xmq/registrationCenter"
 	"errors"
+	"github.com/samuel/go-zookeeper/zk"
 	"hash/crc32"
 )
 
@@ -20,6 +21,7 @@ func NewBundles() (*Bundles, error) {
 	bs := &Bundles{
 		Bundles: make(map[int]*Bundle),
 	}
+	// check bundle num
 	for i := 1; i <= config.SrvConf.DefaultNumberOfBundles; i++ {
 		b, err := NewBundle(i)
 		if err != nil {
@@ -39,8 +41,17 @@ func NewBundle(id int) (*Bundle, error) {
 		Start: uint32Shard*uint32(id) - uint32Shard,
 	}
 	b := &Bundle{Info: info}
+
 	if err := rc.ZkCli.RegisterBunode(info); err != nil {
-		return nil, err
+		if err == zk.ErrNodeExists {
+			pre, err1 := rc.ZkCli.GetBundle(id)
+			if err1 != nil {
+				return nil, err1
+			}
+			b.Info = pre
+		} else {
+			return nil, err
+		}
 	}
 	return b, nil
 }

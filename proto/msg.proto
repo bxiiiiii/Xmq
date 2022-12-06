@@ -52,6 +52,8 @@ message ConnectArgs {
   int32 partition = 5;
   int32 type = 6;
   int32 timeout = 7;
+  int32 pubMode = 8;
+  int32 partitionNum = 9;
 }
 
 message ConnectReply {

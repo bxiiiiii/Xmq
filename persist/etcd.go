@@ -2,6 +2,7 @@ package persist
 
 import (
 	"Xmq/config"
+	"Xmq/logger"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -17,8 +18,9 @@ func PersistInit() {
 	var err error
 	EtcdCli, err = clientv3.New(config)
 	if err != nil {
-		panic("connect etcd failed.")
+		panic(logger.Errorf("connect etcd failed: %v", err))
 	}
+	logger.Infoln("etcd init over")
 }
 
 // operations include put/get/... are implemented in broker.
