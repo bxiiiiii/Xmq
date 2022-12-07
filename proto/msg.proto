@@ -54,6 +54,7 @@ message ConnectArgs {
   int32 timeout = 7;
   int32 pubMode = 8;
   int32 partitionNum = 9;
+  int64 id = 10;
 }
 
 message ConnectReply {
@@ -125,6 +126,7 @@ message MsgArgs {
   uint64 msid = 5;
   string payload = 6;
   int32 redo = 7;
+  string suber = 8;
 }
 
 message MsgReply {}

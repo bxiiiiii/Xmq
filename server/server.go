@@ -90,6 +90,7 @@ func NewServerFromConfig() *Server {
 	s := &Server{
 		ps: make(map[string]*partitionData),
 		kv: clientv3.NewKV(persist.EtcdCli),
+		Sl: NewSublist(),
 		// bundle2broker: make(map[bundle.BundleInfo]rc.BrokerNode),
 	}
 	s.Info = &rc.BrokerNode{
@@ -360,12 +361,18 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 	curName := preName
 	if config.SrvConf.AllowRenameForClient {
 		index := 1
-		for _, ok := s.conns.Load(curName); ok; index++ {
-			curName = preName
-			curName += "(" + strconv.Itoa(index) + ")"
+		for {
+			if _, ok := s.conns.Load(curName); ok {
+				curName = preName
+				curName += "(" + strconv.Itoa(index) + ")"
+				index++
+			} else {
+				break
+			}
 		}
 	} else {
-		if _, ok := s.conns.Load(curName); !ok {
+		if _, ok := s.conns.Load(curName); ok {
+			logger.Infoln("Name conflict, rename plz")
 			return nil, errors.New("Name conflict, rename plz")
 		}
 	}
@@ -375,6 +382,7 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 	if preName != curName {
 		return reply, errors.New("Automatically rename")
 	}
+	logger.Debugf("Connect reply: %v", reply)
 	return reply, nil
 }
 
@@ -391,6 +399,7 @@ func (c *client) waitcallback(ch <-chan zk.Event) {
 }
 
 func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.SubscribeReply, error) {
+	logger.Infof("Receive Subscribe rq from %v", args)
 	reply := &pb.SubscribeReply{}
 	sub := NewSubcription()
 	sub.Data.Meta.TopicName = args.Topic
@@ -412,23 +421,23 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 	} else {
 		isExists, err := rc.ZkCli.IsSubcriptionExist(snode)
 		if err != nil {
-			reply.Error = err.Error()
-			return reply, err
+			logger.Errorf("IsSubcriptionExist failed: %v", err)
+			return reply, errors.New("404")
 		}
 		if isExists {
 			existSnode, err := rc.ZkCli.GetSub(snode)
 			if err != nil {
-				reply.Error = err.Error()
-				return reply, err
+				logger.Errorf("GetSub failed: %v", err)
+				return reply, errors.New("404")
 			}
 			if existSnode.Subtype != snode.Subtype {
-				reply.Error = "there is confict between existing subcription and yours"
-				return reply, nil
+				logger.Warnln("there is confict between existing subcription and yours")
+				return reply, errors.New("there is confict between existing subcription and yours")
 			}
 			existSdata, err := s.GetSubcription(existSnode)
 			if err != nil {
-				reply.Error = err.Error()
-				return reply, err
+				logger.Errorf("GetSubcription failed: %v", err)
+				return reply, errors.New("404")
 			}
 			exSub = existSdata
 			s.Sl.Subs[key] = exSub
@@ -437,6 +446,7 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 
 	if exSub != nil {
 		if exSub.Data.Meta.Subtype == snode.Subtype && exSub.Data.Subers[args.Name] == args.Name {
+			logger.Warnln("Repeat subscription")
 			return reply, errors.New("Repeat subscription")
 		}
 
@@ -452,8 +462,8 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 					return reply, err
 				}
 			} else {
-				reply.Error = "there is a suber in existing subcription"
-				return reply, nil
+				logger.Warnln("there is a suber in existing subcription")
+				return reply, errors.New("there is a suber in existing subcription")
 			}
 		case Failover:
 			isExists, err := rc.ZkCli.IsSubersExists(args.Topic, int(args.Partition), args.Name)
@@ -502,9 +512,12 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 	if _, ok := s.ps[name]; !ok {
 		pNode, err := rc.ZkCli.GetPartition(args.Topic, int(args.Partition))
 		if err != nil {
-			// todo
+			logger.Errorf("GetPartition failed: %v", err)
+			return nil, errors.New("404")
 		}
-		s.ps[name].pNode = pNode
+		s.ps[name] = &partitionData{
+			pNode: pNode,
+		}
 	}
 
 	s.ps[name].mu.Lock()
@@ -524,17 +537,20 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 		reply.Error = err.Error()
 		return reply, err
 	}
-
+	logger.Debugf("handle subscribe over: %v", reply)
 	return reply, nil
 }
 
 func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullReply, error) {
+	logger.Infof("Receive Pull rq from %v", args)
 	reply := &pb.PullReply{}
 	pua := &msg.PullArg{
 		Topic:     args.Topic,
 		Partition: int(args.Partition),
 		Subname:   args.Subscription,
 		Bufsize:   int(args.BufSize),
+		Full:      make(chan bool),
+		Timeout:   make(chan bool),
 	}
 
 	pkey := fmt.Sprintf(partitionKey, pua.Topic, pua.Partition)
@@ -546,52 +562,58 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 	go pua.CheckTimeout(int(args.Timeout))
 
 	for {
-		if _, ok := <-pua.Timeout; ok {
+		select {
+		case <-pua.Timeout:
 			break
-		}
-		if pNode.pNode.Mnum > exSub.Data.PushOffset || pua.Bufsize <= 0 {
-			pua.Full <- true
-			break
-		}
+		default:
+			// pNode.mu.Lock()
+			if pNode.pNode.Mnum < exSub.Data.PushOffset || pua.Bufsize <= 0 {
+				pua.Full <- true
+				break
+			}
 
-		exSub.mu.Lock()
-		i := exSub.Data.PushOffset
-		if i <= pNode.pNode.Mnum {
-			var m *msg.MsgData
-			key := fmt.Sprintf(msgKey, pua.Topic, pua.Partition, i)
-			if en, ok := pNode.msgs.Load(key); ok {
-				m = en.(*msg.MsgData)
-			} else {
-				ms, err := s.GetMsg(pua, i)
-				if err != nil {
-					reply.Error = err.Error()
-					return reply, err
+			exSub.mu.Lock()
+			i := exSub.Data.PushOffset
+			if i <= pNode.pNode.Mnum {
+				var m *msg.MsgData
+				key := fmt.Sprintf(msgKey, pua.Topic, pua.Partition, i)
+				if en, ok := pNode.msgs.Load(key); ok {
+					m = en.(*msg.MsgData)
+				} else {
+					ms, err := s.GetMsg(pua, i)
+					if err != nil {
+						reply.Error = err.Error()
+						return reply, err
+					}
+					m = ms
 				}
-				m = ms
-			}
-			i++
-			exSub.mu.Unlock()
-			mArgs := &pb.MsgArgs{
-				Name:      key,
-				Topic:     args.Topic,
-				Partition: args.Partition,
-				Mid:       m.Mid,
-				Msid:      m.Msid,
-				Payload:   m.Payload,
-				Redo:      0,
-			}
-			_, err := s.sendMsgWithRedo(mArgs, exSub, config.SrvConf.OperationTimeout)
-			if err != nil {
-				logger.Errorf("sendMsgWithRedo failed: %v", err)
-				// dead letter
-			}
-			pua.Bufsize--
+				i++
+				exSub.mu.Unlock()
+				mArgs := &pb.MsgArgs{
+					Name:      key,
+					Topic:     args.Topic,
+					Partition: args.Partition,
+					Mid:       m.Mid,
+					Msid:      m.Msid,
+					Payload:   m.Payload,
+					Redo:      0,
+					Suber:     args.Name,
+				}
+				_, err := s.sendMsg(mArgs, exSub, config.SrvConf.OperationTimeout)
+				if err != nil {
+					logger.Errorf("sendMsgWithRedo failed: %v", err)
+					// dead letter
+				}
+				pua.Bufsize--
 
-			pNode.mu.Lock()
-			if pNode.pNode.PushOffset < i {
-				pNode.pNode.PushOffset = i
+				pNode.mu.Lock()
+				if pNode.pNode.PushOffset < i {
+					pNode.pNode.PushOffset = i
+				}
+				pNode.mu.Unlock()
+			} else {
+				exSub.mu.Unlock()
 			}
-			pNode.mu.Unlock()
 		}
 	}
 	return reply, nil
@@ -612,7 +634,8 @@ func (s *Server) sendMsgWithRedo(args *pb.MsgArgs, sub *subcription, timeout int
 }
 
 func (s *Server) sendMsg(args *pb.MsgArgs, sub *subcription, timeout int) (*pb.MsgReply, error) {
-	cli := pb.NewClientClient(sub.clients[args.Name])
+	logger.Debugf("send a msg: %v", args)
+	cli := pb.NewClientClient(sub.clients[args.Suber])
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(timeout))
 	defer cancel()
 	return cli.ProcessMsg(ctx, args)
@@ -760,7 +783,7 @@ func (s *Server) ProcessUnsub(ctx context.Context, args *pb.UnSubscribeArgs) (*p
 func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.PublishReply, error) {
 	logger.Infof("Receive Publish rq from %v", args)
 	reply := &pb.PublishReply{}
-	var pNode *partitionData
+	pNode := new(partitionData)
 	path := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
 	if v, ok := s.partitions.Load(path); ok {
 		pNode = v.(*partitionData)
@@ -773,7 +796,8 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 			pNode.pNode, err = rc.ZkCli.GetPartition(args.Topic, int(args.Partition))
 			s.partitions.Store(path, pNode)
 		} else {
-			return reply, errors.New("there is no this topic/partition")
+			logger.Errorf("there is no this topic/partition %v/%v", args.Topic, args.Partition)
+			return reply, errors.New("404")
 		}
 	}
 
@@ -796,5 +820,20 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 	}
 	logger.Infof("persist a message: %v %v", pa, mData)
 	pNode.mu.Unlock()
+
+	return reply, nil
+}
+
+func (s *Server) GetTopicInfo(ctx context.Context, args *pb.GetTopicInfoArgs) (*pb.GetTopicInfoReply, error) {
+	logger.Infof("Receive GetTopicInfo rq from %v", args)
+	reply := &pb.GetTopicInfoReply{}
+	tNode, err := rc.ZkCli.GetTopic(args.Topic)
+	if err != nil {
+		logger.Errorf("GetTopic failed: %v", err)
+		return reply, errors.New("404")
+	}
+
+	reply.PartitionNum = int32(tNode.Pnum)
+	logger.Debugf("GetTopicInfo reply: %v", reply)
 	return reply, nil
 }

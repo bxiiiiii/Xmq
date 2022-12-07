@@ -36,7 +36,7 @@ func (s *Server) LookUp(ctx context.Context, args *pb.LookUpArgs) (*pb.LookUpRep
 		return reply, errors.New("need to connect leader to alloc")
 	}
 	reply.Url = s.bundles.Bundles[bundleID].Info.BrokerUrl
-	logger.Infof("LookUp reply: %v", reply)
+	logger.Debugf("LookUp reply: %v", reply)
 	return reply, nil
 }
 

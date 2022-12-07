@@ -9,13 +9,13 @@ import (
 
 type subcription struct {
 	mu   sync.Mutex
-	Data subcriptionData
+	Data *subcriptionData
 	// Clients map[string]*client
 	clients map[string]*grpc.ClientConn
 	Ackch   chan uint64
 }
 
-// todo: need to persist ? or to rc ? 
+// todo: need to persist ? or to rc ?
 type subcriptionData struct {
 	Meta       rc.SubcriptionNode
 	Subers     map[string]string
@@ -34,7 +34,7 @@ func NewSublist() *sublist {
 }
 
 func NewSubcription() *subcription {
-	data := subcriptionData{
+	data := &subcriptionData{
 		Subers: make(map[string]string),
 	}
 	sub := &subcription{

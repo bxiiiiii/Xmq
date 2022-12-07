@@ -343,7 +343,18 @@ func (c *ZkClient) GetSub(snode *SubcriptionNode) (*SubcriptionNode, error) {
 }
 
 func (c *ZkClient) GetPartition(topic string, partition int) (*PartitionNode, error) {
+	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, topic, partition)
+	logger.Debugf("GetPartition from %v", path)
+	data, _, err := c.Conn.Get(path)
+	if err != nil {
+		return nil, err
+	}
+
 	pNode := &PartitionNode{}
+	if err := json.Unmarshal(data, pNode); err != nil {
+		return nil, err
+	}
+
 	return pNode, nil
 }
 
@@ -466,7 +477,8 @@ func (c *ZkClient) IsTopicExists(topic string) (bool, error) {
 }
 
 func (c *ZkClient) IsPartitionExists(topic string, partition int) (bool, error) {
-	path := c.ZkTopicRoot + "/" + topic + "p" + strconv.Itoa(partition)
+	path := c.ZkTopicRoot + "/" + topic + "/p" + strconv.Itoa(partition)
+	logger.Debugf("IsPartitionExists from %v", path)
 	return c.isZnodeExists(path)
 }
 
