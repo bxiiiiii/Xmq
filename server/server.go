@@ -72,6 +72,22 @@ const (
 
 type PublishMode int32
 
+type SubscribeMode int32
+
+type RouteMode int32
+
+const (
+	SMode_Exclusive SubscribeMode = 0
+	SMode_Failover  SubscribeMode = 1
+	SMode_Shard     SubscribeMode = 2
+	SMode_KeyShard  SubscribeMode = 3
+)
+
+const (
+	RMode_RoundRobinPartition RouteMode = 0
+	RMode_CustomPartition     RouteMode = 1
+)
+
 const (
 	PMode_Exclusive     PublishMode = 0
 	PMode_WaitExclusive PublishMode = 1
@@ -264,6 +280,16 @@ func (s *Server) get(key string) ([]byte, error) {
 	return resp.Kvs[0].Value, nil
 }
 
+func (s *Server) DeleteMsg(topic string, partition int, msid uint64) error {
+	key := fmt.Sprintf(msgKey, topic, partition, msid)
+	return s.pDelete(key)
+}
+
+func (s *Server) pDelete(key string) error {
+	_, err := s.kv.Delete(context.TODO(), key)
+	return err
+}
+
 func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.ConnectReply, error) {
 	logger.Infof("Receive Connect rq from %v", args)
 	reply := &pb.ConnectReply{}
@@ -323,11 +349,20 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 			}
 
 			if isExists {
-				logger.Debugf("This Exclusive topic already has a puber")
-				conn.Close()
-				return reply, errors.New("This Exclusive topic already has a puber")
+				pubNode, err := rc.ZkCli.GetPuber(args.Topic, int(args.Partition))
+				if err != nil {
+					logger.Errorf("GetPuber failed: %v", err)
+					conn.Close()
+					return reply, errors.New("404")
+				}
+
+				if pubNode.ID != args.Id {
+					logger.Debugf("This Exclusive topic already has a puber")
+					conn.Close()
+					return reply, errors.New("This Exclusive topic already has a puber")
+				}
 			} else {
-				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition)); err != nil {
+				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition), args.Id); err != nil {
 					logger.Errorf("RegisterLeadPuberNode failed: %v", err)
 					conn.Close()
 					return reply, errors.New("404")
@@ -346,7 +381,7 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 					//TODO: consider timeout and restart election
 				}
 			} else {
-				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition)); err != nil {
+				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition), args.Id); err != nil {
 					logger.Errorf("RegisterLeadPuberNode failed: %v", err)
 					conn.Close()
 					return reply, errors.New("404")
@@ -446,56 +481,59 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 
 	if exSub != nil {
 		if exSub.Data.Meta.Subtype == snode.Subtype && exSub.Data.Subers[args.Name] == args.Name {
-			logger.Warnln("Repeat subscription")
-			return reply, errors.New("Repeat subscription")
-		}
+			logger.Warnln("Repeat subscription, change connection")
+			// return reply, errors.New("Repeat subscription")
+			conn, _ := s.conns.LoadAndDelete(args.Name)
+			exSub.Data.Subers[args.Name] = args.Name
+			exSub.clients[args.Name] = conn.(*grpc.ClientConn)
+		} else {
+			switch exSub.Data.Meta.Subtype {
+			case int(SMode_Exclusive):
+				if len(exSub.Data.Subers) == 0 {
+					conn, _ := s.conns.LoadAndDelete(args.Name)
+					exSub.Data.Subers[args.Name] = args.Name
+					exSub.clients[args.Name] = conn.(*grpc.ClientConn)
 
-		switch exSub.Data.Meta.Subtype {
-		case Exclusive:
-			if len(exSub.Data.Subers) == 0 {
-				conn, _ := s.conns.LoadAndDelete(args.Name)
-				exSub.Data.Subers[args.Name] = args.Name
-				exSub.clients[args.Name] = conn.(*grpc.ClientConn)
-
-				if err := s.PutSubcription(exSub); err != nil {
-					reply.Error = err.Error()
-					return reply, err
+					if err := s.PutSubcription(exSub); err != nil {
+						reply.Error = err.Error()
+						return reply, err
+					}
+				} else {
+					logger.Warnln("there is a suber in existing subcription")
+					return reply, errors.New("there is a suber in existing subcription")
 				}
-			} else {
-				logger.Warnln("there is a suber in existing subcription")
-				return reply, errors.New("there is a suber in existing subcription")
-			}
-		case Failover:
-			isExists, err := rc.ZkCli.IsSubersExists(args.Topic, int(args.Partition), args.Name)
-			if err != nil {
-				logger.Errorf("IsSubersExists failed: %v", err)
-				//todo: close conn
-				return reply, errors.New("404")
-			}
-			if isExists {
-				if _, ch, err := rc.ZkCli.RegisterLeadSuberWatch(args.Topic, int(args.Partition), args.Subscription); err != nil {
-					<-ch
-					//TODO: consider timeout and restart election
-				}
-			} else {
-				if err := rc.ZkCli.RegisterLeadSuberNode(args.Topic, int(args.Partition), args.Subscription); err != nil {
-					logger.Errorf("RegisterLeadSuberNode failed: %v", err)
-					// conn.Close()
+			case int(SMode_Failover):
+				isExists, err := rc.ZkCli.IsSubersExists(args.Topic, int(args.Partition), args.Name)
+				if err != nil {
+					logger.Errorf("IsSubersExists failed: %v", err)
+					//todo: close conn
 					return reply, errors.New("404")
 				}
-				conn, _ := s.conns.LoadAndDelete(args.Name)
-				exSub.Data.Subers[args.Name] = args.Name
-				exSub.clients[args.Name] = conn.(*grpc.ClientConn)
-			}
-		case Shared:
-			// exSub.Data.Subers[name] = name
-			// exSub.Clients[name] = c
+				if isExists {
+					if _, ch, err := rc.ZkCli.RegisterLeadSuberWatch(args.Topic, int(args.Partition), args.Subscription); err != nil {
+						<-ch
+						//TODO: consider timeout and restart election
+					}
+				} else {
+					if err := rc.ZkCli.RegisterLeadSuberNode(args.Topic, int(args.Partition), args.Subscription); err != nil {
+						logger.Errorf("RegisterLeadSuberNode failed: %v", err)
+						// conn.Close()
+						return reply, errors.New("404")
+					}
+					conn, _ := s.conns.LoadAndDelete(args.Name)
+					exSub.Data.Subers[args.Name] = args.Name
+					exSub.clients[args.Name] = conn.(*grpc.ClientConn)
+				}
+			case int(SMode_Shard):
+				// exSub.Data.Subers[name] = name
+				// exSub.Clients[name] = c
 
-			// if err := c.srv.PutSubcription(exSub); err != nil {
-			// 	reply.Error = err.Error()
-			// 	return reply, err
-			// }
-			//TODO: need some extra action
+				// if err := c.srv.PutSubcription(exSub); err != nil {
+				// 	reply.Error = err.Error()
+				// 	return reply, err
+				// }
+				//TODO: need some extra action
+			}
 		}
 	} else {
 		if err := rc.ZkCli.RegisterSnode(snode); err != nil {
@@ -564,12 +602,15 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 	for {
 		select {
 		case <-pua.Timeout:
-			break
+			logger.Infof("Pull rq timed out %v", args)
+			reply.Error = "time out"
+			return reply, nil
 		default:
 			// pNode.mu.Lock()
-			if pNode.pNode.Mnum < exSub.Data.PushOffset || pua.Bufsize <= 0 {
+			if pua.Bufsize <= 0 {
 				pua.Full <- true
-				break
+				reply.Error = "buffer is full"
+				return reply, nil
 			}
 
 			exSub.mu.Lock()
@@ -609,8 +650,17 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 				pNode.mu.Lock()
 				if pNode.pNode.PushOffset < i {
 					pNode.pNode.PushOffset = i
+					if err := rc.ZkCli.UpdatePartition(pNode.pNode); err != nil {
+						logger.Errorf("UpdatePartition failed: %v", err)
+					}
 				}
 				pNode.mu.Unlock()
+				if exSub.Data.PushOffset < i {
+					exSub.Data.PushOffset = i
+					if err := s.PutSubcription(exSub); err != nil {
+						logger.Errorf("PutSubcription failed: %v", err)
+					}
+				}
 			} else {
 				exSub.mu.Unlock()
 			}
@@ -804,6 +854,7 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 	pNode.mu.Lock()
 	mData := msg.MsgData{
 		Msid:    pNode.pNode.Mnum + 1,
+		Mid:     args.Mid,
 		Payload: args.Payload,
 	}
 	pa := &msg.PubArg{
@@ -815,6 +866,7 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 		return reply, err
 	}
 	pNode.pNode.Mnum += 1
+	reply.Msid = pNode.pNode.Mnum
 	if err := rc.ZkCli.UpdatePartition(pNode.pNode); err != nil {
 		return reply, err
 	}
