@@ -2,6 +2,7 @@ broker: {
   name: "broker1",
   host: "localhost",
   port: 8888,
+  logLevel: -1,
   defaultSendSize: 30,
   rpcTimeout: 5,
   # load Weight
@@ -34,6 +35,9 @@ broker: {
 
   operationRedoNum: 3,
   operationTimeout: 1,
+
+  HeartBeatInterval: 3,
+	TimeoutTimes: 1,
 }
 
 zookeeper: {

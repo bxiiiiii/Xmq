@@ -18,13 +18,14 @@ import (
 var ZkCli *ZkClient
 
 var (
-	BnodePath     = "%v/%v"               // BrokerRoot/BrokerName
-	TnodePath     = "%v/%v"               // TopicRoot/TopicName
-	BunodePath    = "%v/bundle%v"         // BundleRoot/BundleName
-	PnodePath     = "%v/%v/p%v"           // TopicRoot/TopicName/PartitionName
-	SnodePath     = "%v/%v/p%v/%v"        // TopicRoot/TopicName/PartitionName/SubcriptionName
-	LeadPuberPath = "%v/%v/p%v/leader"    // TopicRoot/TopicName/PartitionName
-	LeadSuberPath = "%v/%v/p%v/%v/leader" // TopicRoot/TopicName/PartitionName/SubcriptionName
+	BnodePath     = "%v/%v"                            // BrokerRoot/BrokerName
+	TnodePath     = "%v/%v"                            // TopicRoot/TopicName
+	BunodePath    = "%v/bundle%v"                      // BundleRoot/BundleName
+	PnodePath     = "%v/%v/p%v"                        // TopicRoot/TopicName/PartitionName
+	SnodePath     = "%v/%v/p%v/subscription/%v"        // TopicRoot/TopicName/PartitionName/SubcriptionName
+	LeadPuberPath = "%v/%v/p%v/puber/leader"           // TopicRoot/TopicName/PartitionName
+	LeadSuberPath = "%v/%v/p%v/subscription/%v/leader" // TopicRoot/TopicName/PartitionName/SubcriptionName
+	PuberPath     = "%v/%v/p%v/puber/%v"
 )
 
 type ZkClient struct {
@@ -39,27 +40,27 @@ type ZkClient struct {
 }
 
 type BrokerNode struct {
-	Name      string `json:"name"`
-	Host      string `json:"host"`
-	Port      int    `json:"port"`
-	Pnum      int    `json:"pnum"`
+	Name      string
+	Host      string
+	Port      int
+	Pnum      int
 	Version   int32
 	Load      ct.BrokerUsage
 	LoadIndex float64
 }
 
 type TopicNode struct {
-	Name       string `json:"name"`
-	Pnum       int    `json:"pnum"`
+	Name       string
+	Pnum       int
 	PulishMode int
 }
 
 type PartitionNode struct {
-	ID         int    `json:"name"`
-	TopicName  string `json:"topicName"`
-	Mnum       uint64 `json:"mnum"`
-	AckOffset  uint64 `json:"ackoffset"`
-	PushOffset uint64 `json:"pushoffset"`
+	ID         int
+	TopicName  string
+	Mnum       uint64
+	AckOffset  uint64
+	PushOffset uint64
 	Url        string
 	Version    int32
 }
@@ -81,6 +82,13 @@ type SubcriptionNode struct {
 
 type LeaderNode struct {
 	LeaderUrl string
+}
+
+type PuberNode struct {
+	ID        int64
+	Topic     string
+	Partition int
+	Version   int32
 }
 
 func RcInit() {
@@ -175,7 +183,24 @@ func (c *ZkClient) RegisterPnode(pnode *PartitionNode) error {
 	if err != nil {
 		return err
 	}
-	return c.RegisterNode(path, data)
+	err = c.RegisterNode(path, data)
+	if err != nil {
+		return err
+	}
+
+	subPath := path + "/subscription"
+	err = c.RegisterNode(subPath, []byte(""))
+	if err != nil {
+		return err
+	}
+
+	puberPath := path + "/puber"
+	err = c.RegisterNode(puberPath, []byte(""))
+	if err != nil {
+		return err
+	}
+	
+	return nil
 }
 
 func (c *ZkClient) RegisterBunode(bunode *BundleNode) error {
@@ -196,9 +221,19 @@ func (c *ZkClient) RegisterSnode(snode *SubcriptionNode) error {
 	return c.RegisterNode(path, data)
 }
 
-func (c *ZkClient) RegisterLeadPuberNode(topic string, partition int) error {
+func (c *ZkClient) RegisterLeadPuberNode(topic string, partition int, id int64) error {
+	pubNode := &PuberNode{
+		Topic:     topic,
+		Partition: partition,
+		ID:        id,
+	}
 	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, topic, partition)
-	return c.RegisterNode(path, []byte{65})
+	data, err := json.Marshal(pubNode)
+	if err != nil {
+		return err
+	}
+
+	return c.RegisterNode(path, data)
 }
 
 func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscription string) error {
@@ -212,6 +247,21 @@ func (c *ZkClient) RegisterLeadBrokernode(lNode *LeaderNode) error {
 		return err
 	}
 	return c.registerTemNode(c.LeadBrokerPath, data)
+}
+
+func (c *ZkClient) RegisterPuberNode(topic string, partition int, id int64) error {
+	pubNode := &PuberNode{
+		Topic:     topic,
+		Partition: partition,
+		ID:        id,
+	}
+	path := fmt.Sprintf(PuberPath, c.ZkTopicRoot, topic, partition, id)
+	data, err := json.Marshal(pubNode)
+	if err != nil {
+		return err
+	}
+
+	return c.RegisterNode(path, data)
 }
 
 func (c *ZkClient) RegisterNode(path string, data []byte) error {
@@ -392,21 +442,37 @@ func (c *ZkClient) GetLeader() (*LeaderNode, error) {
 	}
 
 	lNode := &LeaderNode{}
-	if err = json.Unmarshal(data, lNode); err != nil {
+	if err := json.Unmarshal(data, lNode); err != nil {
 		return nil, err
 	}
 	return lNode, nil
 }
 
-func (c *ZkClient) GetAllBrokers() ([]*BrokerNode, error) {
-	var brokers []*BrokerNode
-	znodes, _, err := c.Conn.Children(c.ZkBrokerRoot)
+func (c *ZkClient) GetLeadPuber(topic string, partition int) (*PuberNode, error) {
+	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, topic, partition)
+	logger.Debugf("GetPuber path: %v", path)
+	data, _, err := c.Conn.Get(path)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, znode := range znodes {
-		bPath := c.ZkBrokerRoot + "/" + znode
+	pubNode := &PuberNode{}
+	if err := json.Unmarshal(data, pubNode); err != nil {
+		return nil, err
+	}
+
+	return pubNode, nil
+}
+
+func (c *ZkClient) GetAllBrokers() ([]*BrokerNode, error) {
+	var brokers []*BrokerNode
+	zNodes, _, err := c.Conn.Children(c.ZkBrokerRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, zNode := range zNodes {
+		bPath := c.ZkBrokerRoot + "/" + zNode
 		data, _, err := c.Conn.Get(bPath)
 		if err != nil {
 			return nil, err
@@ -421,13 +487,48 @@ func (c *ZkClient) GetAllBrokers() ([]*BrokerNode, error) {
 	return brokers, nil
 }
 
+func (c *ZkClient) GetPubers(topic string, partition int) ([]*PuberNode, error) {
+	var pubers []*PuberNode
+	path := fmt.Sprintf("%v/%v/p%v/puber", c.ZkTopicRoot, topic, partition)
+	zNodes, _, err := c.Conn.Children(path)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, zNode := range zNodes {
+		pPath := path + "/" + zNode
+		data, _, err := c.Conn.Get(pPath)
+		if err != nil {
+			return nil, err
+		}
+		pPnode := &PuberNode{}
+		err = json.Unmarshal(data, pPnode)
+		if err != nil {
+			return nil, err
+		}
+		pubers = append(pubers, pPnode)
+	}
+	return pubers, nil
+}
+
 func (c *ZkClient) IsPubersExists(topic string, partition int) (bool, error) {
-	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, topic, partition)
+	path := fmt.Sprintf("%v/%v/p%v/puber", c.ZkTopicRoot, topic, partition)
 	pubers, _, err := c.Conn.Children(path)
 	if err != nil {
 		return false, err
 	}
-	return len(pubers) == 0, nil
+	logger.Debugln("IsPubersExists path: ", path, " ", len(pubers))
+	return len(pubers) != 0, nil
+}
+
+func (c *ZkClient) HowManyPubers(topic string, partition int) (int, error) {
+	path := fmt.Sprintf("%v/%v/p%v/puber", c.ZkTopicRoot, topic, partition)
+	pubers, _, err := c.Conn.Children(path)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(pubers), nil
 }
 
 func (c *ZkClient) IsSubersExists(topic string, partition int, subscription string) (bool, error) {
@@ -557,8 +658,41 @@ func (c *ZkClient) UpdateBundle(buNode *BundleNode) error {
 		return err
 	}
 	_, err = c.Conn.Set(path, data, buNode.Version)
+	if err != nil {
+		return err
+	}
 	buNode.Version++
 	return err
+}
+
+func (c *ZkClient) UpdateLeadPuber(pubNode *PuberNode) error {
+	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, pubNode.Topic, pubNode.Partition)
+	data, err := json.Marshal(pubNode)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.Conn.Set(path, data, pubNode.Version)
+	if err != nil {
+		return err
+	}
+	pubNode.Version++
+
+	return err
+}
+
+func (c *ZkClient) DeleteLeadPuber(topic string, partition int) error {
+	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, topic, partition)
+	pubNode, err := c.GetLeadPuber(topic, partition)
+	if err != nil {
+		return err
+	}
+
+	if err := c.Conn.Delete(path, pubNode.Version); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (c *ZkClient) Close() {

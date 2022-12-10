@@ -1,6 +1,9 @@
 package msg
 
-import "time"
+import (
+	"Xmq/logger"
+	"time"
+)
 
 type PubArg struct {
 	Topic     string
@@ -32,8 +35,11 @@ type MsgData struct {
 func (pa *PullArg) CheckTimeout(timeout int) {
 	select {
 	case <-pa.Full:
+		logger.Infoln("Pull rq full")
 		return
 	case <-time.After(time.Second * time.Duration(timeout)):
+		logger.Infoln("Pull rq timed out")
 		pa.Timeout <- true
+
 	}
 }

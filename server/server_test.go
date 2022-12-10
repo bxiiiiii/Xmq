@@ -11,21 +11,24 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type Client struct {
+	server *grpc.Server
 	conn *grpc.ClientConn
 
 	pb.UnimplementedClientServer
 }
 
-func (c *Client) connect() error {
+func (c *Client) connect(port int) error {
 	srvUrl := fmt.Sprintf("%v:%v", config.SrvConf.Host, config.SrvConf.Port)
 	conn, err := grpc.Dial(srvUrl, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -33,12 +36,13 @@ func (c *Client) connect() error {
 	}
 	c.conn = conn
 
-	lis, err := net.Listen("tcp", "127.0.0.1:7777")
+	lis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%v", port))
 	if err != nil {
 		return err
 	}
 
 	s := grpc.NewServer()
+	c.server = s
 	pb.RegisterClientServer(s, &Client{})
 	go s.Serve(lis)
 
@@ -48,6 +52,13 @@ func (c *Client) connect() error {
 func (c *Client) ProcessMsg(ctx context.Context, args *pb.MsgArgs) (*pb.MsgReply, error) {
 	reply := &pb.MsgReply{}
 	fmt.Println(args)
+
+	return reply, nil
+}
+
+func (c *Client) AliveCheck(ctx context.Context, args *pb.AliveCheckArgs) (*pb.AliveCheckReply, error) {
+	reply := &pb.AliveCheckReply{}
+	fmt.Println("-----reveive alive check")
 
 	return reply, nil
 }
@@ -72,6 +83,14 @@ func nrand() int64 {
 	bigx, _ := rand.Int(rand.Reader, max)
 	x := bigx.Int64()
 	return x
+}
+
+func getErrorString(err error) string {
+	statusErr, ok := status.FromError(err)
+	if !ok {
+		return ""
+	}
+	return statusErr.Message()
 }
 
 func TestPut(t *testing.T) {
@@ -157,6 +176,293 @@ func TestPubulish(t *testing.T) {
 	// assert.Nil(t, err)
 }
 
+func TestPMode_ExclusiveOfPuber(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestPMode_ExclusiveOfPuber"
+	partition := 1
+
+	cli1 := &Client{}
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "puber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	pubers, err := rc.ZkCli.HowManyPubers(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, pubers)
+
+	cli2 := &Client{}
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "puber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs2)
+	assert.Equal(t, "This Exclusive topic already has a puber", err.Error())
+
+	newPubers, err := rc.ZkCli.HowManyPubers(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, newPubers)
+}
+
+func TestReConnect(t *testing.T) {
+
+}
+
+func TestPMode_WaitExclusiveOfPuber_Timeout(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestPMode_WaitExclusiveOfPuber_Timeout"
+	partition := 1
+
+	cli1 := &Client{}
+	id1 := nrand()
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "puber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           id1,
+		PubMode:      int32(PMode_WaitExclusive),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	pubers, err := rc.ZkCli.HowManyPubers(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, pubers)
+
+	cli2 := &Client{}
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "puber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_WaitExclusive),
+		PartitionNum: 1,
+	}
+
+	ch := make(chan bool)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*2*time.Duration(config.SrvConf.HeartBeatInterval))
+		defer cancel()
+		_, err := s.Connect(ctx, conArgs2)
+		if ok := checkTimeout(err); ok {
+			ch <- true
+		} else {
+			fmt.Println(err)
+			ch <- false
+		}
+	}()
+
+	re := <-ch
+	assert.True(t, re)
+
+	newPubers, err := rc.ZkCli.HowManyPubers(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, newPubers)
+
+	LeadPuber, err := rc.ZkCli.GetLeadPuber(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, id1, LeadPuber.ID)
+}
+
+func TestPMode_WaitExclusiveOfPuber_Failover(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestPMode_WaitExclusiveOfPuber_Failover"
+	partition := 1
+
+	cli1 := &Client{}
+	id1 := nrand()
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "puber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           id1,
+		PubMode:      int32(PMode_WaitExclusive),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	pubers, err := rc.ZkCli.HowManyPubers(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, pubers)
+
+	cli2 := &Client{}
+	id2 := nrand()
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "puber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           id2,
+		PubMode:      int32(PMode_WaitExclusive),
+		PartitionNum: 1,
+	}
+
+	ch := make(chan bool)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*2*time.Duration(config.SrvConf.HeartBeatInterval))
+		defer cancel()
+		_, err := s.Connect(ctx, conArgs2)
+		if err == nil {
+			ch <- true
+		} else {
+			ch <- false
+		}
+	}()
+
+	time.Sleep(time.Second)
+	cli1.server.GracefulStop()
+
+	re := <-ch
+	assert.True(t, re)
+
+	newPubers, err := rc.ZkCli.HowManyPubers(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, newPubers)
+
+	LeadPuber, err := rc.ZkCli.GetLeadPuber(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, id2, LeadPuber.ID)
+}
+
+func TestPMode_SharedOfPuber(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestPMode_SharedOfPuber"
+	partition := 1
+
+	cli1 := &Client{}
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "puber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Shared),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	cli2 := &Client{}
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "puber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Shared),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs2)
+	assert.Nil(t, err)
+
+	pubers, err := rc.ZkCli.GetPubers(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, 2, len(pubers))
+}
+
+func TestMutiPublish2SamePartition(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestMutiPubers2SamePartition"
+	partition := 1
+	data := "testpayload"
+
+	cli1 := &Client{}
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "puber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Shared),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	pNode, err := rc.ZkCli.GetPartition(topic, partition)
+	assert.Nil(t, err)
+
+	// msgs := make(map[uint64]int64)
+	var msgs sync.Map
+	for i := 1; i <= 10; i++ {
+		args := &pb.PublishArgs{
+			Topic:     topic,
+			Partition: int32(partition),
+			Payload:   data,
+			Mid:       nrand(),
+		}
+		reply, err := s.ProcessPub(context.TODO(), args)
+		assert.Nil(t, err)
+
+		_, ok := msgs.LoadOrStore(reply.Msid, args.Mid)
+		assert.False(t, ok)
+	}
+
+	newPNode, err := rc.ZkCli.GetPartition(topic, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, pNode.Mnum+10, newPNode.Mnum)
+}
+
 func TestSubscribeAndPull(t *testing.T) {
 	s, err := RunServer()
 	assert.Nil(t, err)
@@ -166,7 +472,7 @@ func TestSubscribeAndPull(t *testing.T) {
 	partition := 1
 	subscription := "testsubscriptionn"
 
-	err = c.connect()
+	err = c.connect(7777)
 	assert.Nil(t, err)
 
 	conArgs := &pb.ConnectArgs{
