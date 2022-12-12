@@ -25,7 +25,9 @@ import (
 	"github.com/samuel/go-zookeeper/zk"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type Server struct {
@@ -50,9 +52,10 @@ type Server struct {
 }
 
 type partitionData struct {
-	mu    sync.Mutex
-	pNode *rc.PartitionNode
-	msgs  sync.Map
+	mu     sync.Mutex
+	pNode  *rc.PartitionNode
+	msgs   sync.Map
+	pubers []int64
 }
 
 const (
@@ -349,7 +352,7 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 			}
 
 			if isExists {
-				pubNode, err := rc.ZkCli.GetPuber(args.Topic, int(args.Partition))
+				pubNode, err := rc.ZkCli.GetLeadPuber(args.Topic, int(args.Partition))
 				if err != nil {
 					logger.Errorf("GetPuber failed: %v", err)
 					conn.Close()
@@ -357,7 +360,7 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 				}
 
 				if pubNode.ID != args.Id {
-					logger.Debugf("This Exclusive topic already has a puber")
+					logger.Debugln("This Exclusive topic already has a puber")
 					conn.Close()
 					return reply, errors.New("This Exclusive topic already has a puber")
 				}
@@ -367,6 +370,7 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 					conn.Close()
 					return reply, errors.New("404")
 				}
+				go s.ClientAlive(conn, *args)
 			}
 		case PMode_WaitExclusive:
 			isExists, err := rc.ZkCli.IsPubersExists(args.Topic, int(args.Partition))
@@ -376,18 +380,36 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 				return reply, errors.New("404")
 			}
 			if isExists {
-				if _, ch, err := rc.ZkCli.RegisterLeadPuberWatch(args.Topic, int(args.Partition)); err != nil {
-					<-ch
-					//TODO: consider timeout and restart election
+				ch := make(chan error)
+				go handle(ctx, args, ch)
+				select {
+				case err := <-ch:
+					if err != nil {
+						return nil, err
+					}
+				case <-ctx.Done():
+					return nil, status.Error(codes.Canceled, "timed out")
 				}
+				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition), args.Id); err != nil {
+					logger.Errorf("RegisterLeadPuberNode failed: %v", err)
+					conn.Close()
+					return reply, errors.New("404")
+				}
+				go s.ClientAlive(conn, *args)
 			} else {
 				if err := rc.ZkCli.RegisterLeadPuberNode(args.Topic, int(args.Partition), args.Id); err != nil {
 					logger.Errorf("RegisterLeadPuberNode failed: %v", err)
 					conn.Close()
 					return reply, errors.New("404")
 				}
+				go s.ClientAlive(conn, *args)
 			}
-			// case PMode_Shared:
+		case PMode_Shared:
+			if err := rc.ZkCli.RegisterPuberNode(args.Topic, int(args.Partition), args.Id); err != nil {
+				logger.Errorf("RegisterPuberNode failed: %v", err)
+				conn.Close()
+				return reply, errors.New("404")
+			}
 		}
 	case Suber:
 		preName = preName + "-subscriber-" + args.Name
@@ -419,6 +441,20 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 	}
 	logger.Debugf("Connect reply: %v", reply)
 	return reply, nil
+}
+
+func handle(ctx context.Context, args *pb.ConnectArgs, over chan<- error) {
+	_, ch, err := rc.ZkCli.RegisterLeadPuberWatch(args.Topic, int(args.Partition))
+	if err != nil {
+		over <- err
+	}
+
+	select {
+	case <-ctx.Done():
+		logger.Infof("wait timed out %v", args)
+	case <-ch:
+		over <- nil
+	}
 }
 
 func (s *Server) registerTopic(tNode *rc.TopicNode) error {
@@ -851,6 +887,8 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 		}
 	}
 
+	// todo: check
+
 	pNode.mu.Lock()
 	mData := msg.MsgData{
 		Msid:    pNode.pNode.Mnum + 1,
@@ -888,4 +926,37 @@ func (s *Server) GetTopicInfo(ctx context.Context, args *pb.GetTopicInfoArgs) (*
 	reply.PartitionNum = int32(tNode.Pnum)
 	logger.Debugf("GetTopicInfo reply: %v", reply)
 	return reply, nil
+}
+
+func (s *Server) ClientAlive(conn *grpc.ClientConn, Cargs pb.ConnectArgs) {
+	count := 0
+	cli := pb.NewClientClient(conn)
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(config.SrvConf.RpcTimeout))
+		defer cancel()
+		args := &pb.AliveCheckArgs{}
+		_, err := cli.AliveCheck(ctx, args)
+		if err != nil {
+			// if ok := checkTimeout(err); ok {
+			count++
+			if count >= config.SrvConf.TimeoutTimes {
+				rc.ZkCli.DeleteLeadPuber(Cargs.Topic, int(Cargs.Partition))
+				logger.Infof("not alive: %v, err: %v", Cargs, err)
+				return
+			}
+			// }
+		} else {
+			count = 0
+		}
+		time.Sleep(time.Second * time.Duration(config.SrvConf.HeartBeatInterval))
+	}
+}
+
+func checkTimeout(err error) bool {
+	statusErr, ok := status.FromError(err)
+	if ok && (statusErr.Code() == codes.DeadlineExceeded || statusErr.Code() == codes.Canceled) {
+		return true
+	}
+	return false
 }

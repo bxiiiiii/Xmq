@@ -23,7 +23,7 @@ import (
 
 type Client struct {
 	server *grpc.Server
-	conn *grpc.ClientConn
+	conn   *grpc.ClientConn
 
 	pb.UnimplementedClientServer
 }
@@ -461,6 +461,98 @@ func TestMutiPublish2SamePartition(t *testing.T) {
 	newPNode, err := rc.ZkCli.GetPartition(topic, partition)
 	assert.Nil(t, err)
 	assert.Equal(t, pNode.Mnum+10, newPNode.Mnum)
+}
+
+func TestMutiPublish2MutiPartition(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic1 := "TestMutiPublish2MutiPartition1"
+	topic2 := "TestMutiPublish2MutiPartition2"
+	partition := 1
+	data := "testpayload"
+
+	cli1 := &Client{}
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "puber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic1,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Shared),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	cli2 := &Client{}
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "puber1",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic2,
+		Partition:    int32(partition),
+		Type:         Puber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Shared),
+		PartitionNum: 1,
+	}
+	_, err = s.Connect(context.TODO(), conArgs2)
+	assert.Nil(t, err)
+
+	pNode1, err := rc.ZkCli.GetPartition(topic1, partition)
+	assert.Nil(t, err)
+	pNode2, err := rc.ZkCli.GetPartition(topic2, partition)
+	assert.Nil(t, err)
+
+	ch := make(chan bool)
+	go func() {
+		var msgs sync.Map
+		for i := 1; i <= 10; i++ {
+			args := &pb.PublishArgs{
+				Topic:     topic1,
+				Partition: int32(partition),
+				Payload:   data,
+				Mid:       nrand(),
+			}
+			reply, err := s.ProcessPub(context.TODO(), args)
+			assert.Nil(t, err)
+
+			_, ok := msgs.LoadOrStore(reply.Msid, args.Mid)
+			assert.False(t, ok)
+		}
+		ch <- true
+	}()
+	go func() {
+		var msgs sync.Map
+		for i := 1; i <= 10; i++ {
+			args := &pb.PublishArgs{
+				Topic:     topic2,
+				Partition: int32(partition),
+				Payload:   data,
+				Mid:       nrand(),
+			}
+			reply, err := s.ProcessPub(context.TODO(), args)
+			assert.Nil(t, err)
+
+			_, ok := msgs.LoadOrStore(reply.Msid, args.Mid)
+			assert.False(t, ok)
+		}
+		ch <- true
+	}()
+
+	<-ch
+	<-ch
+	newPNode1, err := rc.ZkCli.GetPartition(topic1, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, pNode1.Mnum+10, newPNode1.Mnum)
+	newPNode2, err := rc.ZkCli.GetPartition(topic2, partition)
+	assert.Nil(t, err)
+	assert.Equal(t, pNode2.Mnum+10, newPNode2.Mnum)
 }
 
 func TestSubscribeAndPull(t *testing.T) {
