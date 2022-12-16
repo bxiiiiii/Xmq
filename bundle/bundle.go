@@ -4,8 +4,9 @@ import (
 	"Xmq/config"
 	rc "Xmq/registrationCenter"
 	"errors"
-	"github.com/samuel/go-zookeeper/zk"
 	"hash/crc32"
+
+	"github.com/samuel/go-zookeeper/zk"
 )
 
 type Bundles struct {
@@ -67,12 +68,13 @@ func (bs *Bundles) bsearch(key uint32) (int, error) {
 	}
 
 	bnum := len(bs.Bundles)
-	left := 0
-	right := bnum - 1
+	left := 1
+	right := bnum
 	for left <= right {
 		mid := bs.Bundles[(left+right)/2]
+		// fmt.Println(left, " ", key," ", *mid.Info, " ", right)
 		if key > mid.Info.End-1 {
-			left = mid.Info.ID
+			left = mid.Info.ID+1
 		} else if key < mid.Info.Start {
 			right = mid.Info.ID - 1
 		} else {

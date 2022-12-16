@@ -41,9 +41,12 @@ func (s *Server) LookUp(ctx context.Context, args *pb.LookUpArgs) (*pb.LookUpRep
 }
 
 func (s *Server) RequestAlloc(ctx context.Context, args *pb.RequestAllocArgs) (*pb.RequestAllocReply, error) {
-	logger.Infof("Receive Alloc rq from %v", args)
+	s.loadManager.Mu.Lock()
+	logger.Infof("Receive Alloc rq from %v, %v", args, s.loadManager.State)
 	reply := &pb.RequestAllocReply{}
+
 	if s.loadManager.State != lm.Leader {
+		s.loadManager.Mu.Unlock()
 		lNode, err := rc.ZkCli.GetLeader()
 		if err != nil {
 			logger.Errorf("GetLeader failed: %v", err)
@@ -52,6 +55,7 @@ func (s *Server) RequestAlloc(ctx context.Context, args *pb.RequestAllocArgs) (*
 		reply.Url = lNode.LeaderUrl
 		return reply, errors.New("need to connect leader to alloc")
 	}
+	s.loadManager.Mu.Unlock()
 
 	path := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
 	bundleID, err := s.bundles.GetBundle(path)
@@ -75,7 +79,7 @@ func (s *Server) RequestAlloc(ctx context.Context, args *pb.RequestAllocArgs) (*
 
 	buNode.BrokerUrl = fmt.Sprintf("%v:%v", bNode.Host, bNode.Port)
 	if err := rc.ZkCli.UpdateBundle(buNode); err != nil {
-		logger.Errorf("UpdateBundle failed: %v", err)
+		logger.Errorf("UpdateBundle failed: %v, %v", err, *buNode)
 		return nil, errors.New("404")
 	}
 

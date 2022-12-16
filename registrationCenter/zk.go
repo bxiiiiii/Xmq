@@ -199,7 +199,7 @@ func (c *ZkClient) RegisterPnode(pnode *PartitionNode) error {
 	if err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -340,7 +340,7 @@ func (c *ZkClient) GetBrokers(topic string) ([]*PartitionNode, error) {
 	return pNodes, nil
 }
 
-func (c *ZkClient) GetBroker(topic string, partition int) (*PartitionNode, error) {
+func (c *ZkClient) GetBrokerFrom(topic string, partition int) (*PartitionNode, error) {
 	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, topic, partition)
 	isExists, err := c.IsPartitionExists(topic, partition)
 	if err != nil {
@@ -362,6 +362,20 @@ func (c *ZkClient) GetBroker(topic string, partition int) (*PartitionNode, error
 	}
 
 	return pNode, nil
+}
+
+func (c *ZkClient) GetBroker(name string) (*BrokerNode, error) {
+	path := fmt.Sprintf(BnodePath, c.ZkBrokerRoot, name)
+	data, _, err := c.Conn.Get(path)
+	if err != nil {
+		return nil, err
+	}
+
+	bNode := &BrokerNode{}
+	if err = json.Unmarshal(data, bNode); err != nil {
+		return nil, err
+	}
+	return bNode, nil
 }
 
 func (c *ZkClient) GetTopic(topic string) (*TopicNode, error) {
@@ -630,49 +644,54 @@ func (c *ZkClient) createPartitionTopic(topic string, partition int) error {
 
 func (c *ZkClient) UpdatePartition(pNode *PartitionNode) error {
 	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, pNode.TopicName, pNode.ID)
+	version := pNode.Version
+	pNode.Version++
 	data, err := json.Marshal(pNode)
 	if err != nil {
 		return err
 	}
 
-	_, err = c.Conn.Set(path, data, pNode.Version)
-	pNode.Version++
+	_, err = c.Conn.Set(path, data, version)
 	return err
 }
 
 func (c *ZkClient) UpdateBroker(bNode *BrokerNode) error {
+	// logger.Debugf("UpdateBroker: %v", bNode)
 	path := fmt.Sprintf(BnodePath, c.ZkBrokerRoot, bNode.Name)
+	version := bNode.Version
+	bNode.Version++
 	data, err := json.Marshal(bNode)
 	if err != nil {
 		return err
 	}
-	_, err = c.Conn.Set(path, data, bNode.Version)
-	bNode.Version++
+	_, err = c.Conn.Set(path, data, version)
 	return err
 }
 
 func (c *ZkClient) UpdateBundle(buNode *BundleNode) error {
 	path := fmt.Sprintf(BunodePath, c.ZkBundleRoot, buNode.ID)
+	version := buNode.Version
+	buNode.Version++
 	data, err := json.Marshal(buNode)
 	if err != nil {
 		return err
 	}
-	_, err = c.Conn.Set(path, data, buNode.Version)
+	_, err = c.Conn.Set(path, data, version)
 	if err != nil {
 		return err
 	}
-	buNode.Version++
 	return err
 }
 
 func (c *ZkClient) UpdateLeadPuber(pubNode *PuberNode) error {
 	path := fmt.Sprintf(LeadPuberPath, c.ZkTopicRoot, pubNode.Topic, pubNode.Partition)
+	version := pubNode.Version
+	pubNode.Version++
 	data, err := json.Marshal(pubNode)
 	if err != nil {
 		return err
 	}
-
-	_, err = c.Conn.Set(path, data, pubNode.Version)
+	_, err = c.Conn.Set(path, data, version)
 	if err != nil {
 		return err
 	}

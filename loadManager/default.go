@@ -20,10 +20,11 @@ const (
 var cbch chan bool
 
 type LoadManager struct {
-	mu    sync.Mutex
+	Mu    sync.Mutex
 	State int
 	bNode *rc.BrokerNode
 
+	bmu         sync.Mutex
 	preBrokers  map[string]*rc.BrokerNode
 	curBrokers  map[string]*rc.BrokerNode
 	LoadRanking []*rc.BrokerNode
@@ -79,7 +80,9 @@ func (lm *LoadManager) startLeaderElection() {
 			if err := rc.ZkCli.RegisterLeadBrokernode(lNode); err != nil {
 				logger.Errorf("RegisterLnode failed: %v", err)
 			} else {
+				lm.Mu.Lock()
 				lm.State = Leader
+				lm.Mu.Unlock()
 				lm.startLeaderTask()
 			}
 		}
@@ -101,7 +104,7 @@ func (lm *LoadManager) startWatchAllBrokers() {
 	}
 	<-ch
 
-	lm.mu.Lock()
+	lm.bmu.Lock()
 	lm.pullAllBrokersLoad()
 	for name, bnode := range lm.preBrokers {
 		if _, ok := lm.curBrokers[name]; !ok {
@@ -111,7 +114,7 @@ func (lm *LoadManager) startWatchAllBrokers() {
 		}
 	}
 	lm.preBrokers = lm.curBrokers
-	lm.mu.Unlock()
+	lm.bmu.Unlock()
 }
 
 func (lm *LoadManager) reallocateBundle(broker *rc.BrokerNode) error {
@@ -119,10 +122,13 @@ func (lm *LoadManager) reallocateBundle(broker *rc.BrokerNode) error {
 }
 
 func (lm *LoadManager) AllocateBundle() (*rc.BrokerNode, error) {
+	lm.bmu.Lock()
 	if len(lm.LoadRanking) <= 0 {
 		return nil, errors.New("there is no used broker ?")
 	}
-	return lm.LoadRanking[0], nil
+	b := lm.LoadRanking[0]
+	lm.bmu.Unlock()
+	return b, nil
 }
 
 func (lm *LoadManager) startCollectLoadData() {
@@ -131,7 +137,9 @@ func (lm *LoadManager) startCollectLoadData() {
 		if err != nil {
 			logger.Errorf("CollectLoadData failed: %v", err)
 		} else {
+			lm.Mu.Lock()
 			lm.bNode.Load = usage
+			lm.Mu.Unlock()
 		}
 		time.Sleep(time.Second * time.Duration(config.SrvConf.CollectLoadDataInterval))
 	}
@@ -139,10 +147,14 @@ func (lm *LoadManager) startCollectLoadData() {
 
 func (lm *LoadManager) pushLoadReport2registry() {
 	for {
+		lm.Mu.Lock()
 		if err := rc.ZkCli.UpdateBroker(lm.bNode); err != nil {
-			logger.Infoln(*lm.bNode)
 			logger.Errorf("UpdateBroker failed: %v", err)
+			logger.Debugln(*lm.bNode)
+			b, err1 := rc.ZkCli.GetBroker(config.SrvConf.Name)
+			logger.Debugln(*b, " ", err1)
 		}
+		lm.Mu.Unlock()
 		time.Sleep(time.Second * time.Duration(config.SrvConf.PushLoadDataInterval))
 	}
 }
@@ -152,6 +164,8 @@ func (lm *LoadManager) pullAllBrokersLoad() error {
 	if err != nil {
 		return err
 	}
+	lm.bmu.Lock()
+	defer lm.bmu.Unlock()
 	lm.LoadRanking = brokers
 
 	lm.curBrokers = make(map[string]*rc.BrokerNode)

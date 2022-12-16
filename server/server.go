@@ -406,9 +406,11 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 			}
 		case PMode_Shared:
 			if err := rc.ZkCli.RegisterPuberNode(args.Topic, int(args.Partition), args.Id); err != nil {
-				logger.Errorf("RegisterPuberNode failed: %v", err)
-				conn.Close()
-				return reply, errors.New("404")
+				if err != zk.ErrNodeExists{
+					logger.Errorf("RegisterPuberNode failed: %v", err)
+					conn.Close()
+					return reply, errors.New("404")
+				}
 			}
 		}
 	case Suber:
