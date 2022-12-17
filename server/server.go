@@ -230,6 +230,7 @@ func (s *Server) PutMsg(m *msg.PubArg, mData msg.MsgData) (string, error) {
 
 func (s *Server) PutSubcription(sub *subcription) error {
 	key := fmt.Sprintf(subcriptionKey, sub.Data.Meta.TopicName, sub.Data.Meta.Partition, sub.Data.Meta.Name)
+	logger.Debugf("PutSubcription: %v-%v", key, sub)
 	data, err := json.Marshal(sub.Data)
 	if err != nil {
 		return err
@@ -406,7 +407,7 @@ func (s *Server) Connect(ctx context.Context, args *pb.ConnectArgs) (*pb.Connect
 			}
 		case PMode_Shared:
 			if err := rc.ZkCli.RegisterPuberNode(args.Topic, int(args.Partition), args.Id); err != nil {
-				if err != zk.ErrNodeExists{
+				if err != zk.ErrNodeExists {
 					logger.Errorf("RegisterPuberNode failed: %v", err)
 					conn.Close()
 					return reply, errors.New("404")
@@ -585,29 +586,32 @@ func (s *Server) ProcessSub(ctx context.Context, args *pb.SubscribeArgs) (*pb.Su
 	}
 
 	name := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
-	if _, ok := s.ps[name]; !ok {
+	if _, ok := s.partitions.Load(name); !ok {
 		pNode, err := rc.ZkCli.GetPartition(args.Topic, int(args.Partition))
 		if err != nil {
 			logger.Errorf("GetPartition failed: %v", err)
 			return nil, errors.New("404")
 		}
-		s.ps[name] = &partitionData{
+
+		s.partitions.Store(name, &partitionData{
 			pNode: pNode,
-		}
+		})
 	}
 
-	s.ps[name].mu.Lock()
+	p, _ := s.partitions.Load(name)
+	p.(*partitionData).mu.Lock()
+	pData := p.(*partitionData)
 	switch args.SubOffset {
 	case 0:
-		sub.Data.PushOffset = s.ps[name].pNode.PushOffset + 1
+		sub.Data.PushOffset = pData.pNode.PushOffset + 1
 	default:
-		if sub.Data.PushOffset >= s.ps[name].pNode.Mnum {
-			sub.Data.PushOffset = s.ps[name].pNode.PushOffset + 1
+		if sub.Data.PushOffset >= pData.pNode.Mnum {
+			sub.Data.PushOffset = pData.pNode.PushOffset + 1
 		} else {
 			sub.Data.PushOffset = args.SubOffset
 		}
 	}
-	s.ps[name].mu.Unlock()
+	p.(*partitionData).mu.Unlock()
 
 	if err := s.PutSubcription(sub); err != nil {
 		reply.Error = err.Error()
@@ -630,8 +634,9 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 	}
 
 	pkey := fmt.Sprintf(partitionKey, pua.Topic, pua.Partition)
-	pNode := s.ps[pkey]
-
+	p, _ := s.partitions.Load(pkey)
+	pNode := p.(*partitionData)
+	logger.Debugln(pkey, " ", pNode)
 	skey := fmt.Sprintf(subcriptionKey, pua.Topic, pua.Partition, pua.Subname)
 	exSub := s.Sl.Subs[skey]
 
@@ -704,7 +709,7 @@ func (s *Server) ProcessPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRe
 			}
 		}
 	}
-	return reply, nil
+	// return reply, nil
 }
 
 func (s *Server) sendMsgWithRedo(args *pb.MsgArgs, sub *subcription, timeout int) (*pb.MsgReply, error) {
@@ -802,17 +807,32 @@ func (s *Server) batchPull(ctx context.Context, args *pb.PullArgs) (*pb.PullRepl
 
 func (s *Server) MsgAck(ctx context.Context, args *pb.MsgAckArgs) (*pb.MsgAckReply, error) {
 	reply := &pb.MsgAckReply{}
-	pkey := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
-	pNode := s.ps[pkey]
+	path := fmt.Sprintf(partitionKey, args.Topic, args.Partition)
+	p, ok := s.partitions.Load(path)
+	pData := new(partitionData)
+	if !ok {
+		logger.Errorf("s.partitions.Load failed: %v", path)
+	} else {
+		pData = p.(*partitionData)
+	}
+
+	pData.mu.Lock()
+	if pData.pNode.AckOffset < args.AckOffset{
+		pData.pNode.AckOffset = args.AckOffset
+		if err := rc.ZkCli.UpdatePartition(pData.pNode); err != nil {
+			logger.Errorf("UpdatePartition failed: %v", err)
+		}
+	}
+	pData.mu.Unlock()
 
 	skey := fmt.Sprintf(subcriptionKey, args.Topic, args.Partition, args.Subscription)
 	exSub := s.Sl.Subs[skey]
+	exSub.mu.Lock()
 	if exSub.Data.AckOffset > args.AckOffset {
 		exSub.Data.AckOffset = args.AckOffset
 	}
-	if pNode.pNode.AckOffset > exSub.Data.AckOffset {
-		pNode.pNode.AckOffset = exSub.Data.AckOffset
-	}
+	exSub.mu.Unlock()
+
 
 	//TODO: retry ?
 	return reply, nil
@@ -882,6 +902,9 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 		}
 		if isExists {
 			pNode.pNode, err = rc.ZkCli.GetPartition(args.Topic, int(args.Partition))
+			if err != nil {
+				logger.Errorf("GetPartition failed: %v", err)
+			}
 			s.partitions.Store(path, pNode)
 		} else {
 			logger.Errorf("there is no this topic/partition %v/%v", args.Topic, args.Partition)
@@ -908,6 +931,9 @@ func (s *Server) ProcessPub(ctx context.Context, args *pb.PublishArgs) (*pb.Publ
 	pNode.pNode.Mnum += 1
 	reply.Msid = pNode.pNode.Mnum
 	if err := rc.ZkCli.UpdatePartition(pNode.pNode); err != nil {
+		logger.Errorf("UpdatePartition: %v", err)
+		p, _ := rc.ZkCli.GetPartition(pNode.pNode.TopicName, pNode.pNode.ID)
+		logger.Debugln(*pNode.pNode, " ", *p)
 		return reply, err
 	}
 	logger.Infof("persist a message: %v %v", pa, mData)
