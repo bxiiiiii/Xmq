@@ -352,6 +352,7 @@ func TestPMode_WaitExclusiveOfPuber_Failover(t *testing.T) {
 		if err == nil {
 			ch <- true
 		} else {
+			fmt.Println(err)
 			ch <- false
 		}
 	}()
@@ -611,4 +612,343 @@ func TestSubscribeAndPull(t *testing.T) {
 	}
 	_, err = s.ProcessPull(context.TODO(), pullArgs)
 	assert.Nil(t, err)
+}
+
+func TestSMode_Exclusive(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestSMode_Exclusive"
+	partition := 1
+	subscription := "TestSMode_ExclusiveSubscription"
+
+	cli1 := &Client{}
+	id1 := nrand()
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "suber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           id1,
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err := s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	name := reply.Name
+	args := &pb.SubscribeArgs{
+		Id:           id1,
+		Name:         name,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Exclusive),
+		SubOffset:    1,
+	}
+	_, err = s.ProcessSub(context.TODO(), args)
+	assert.Nil(t, err)
+
+	subers, err := rc.ZkCli.HowManySubers(topic, partition, subscription)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, subers)
+
+	cli2 := &Client{}
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "suber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err = s.Connect(context.TODO(), conArgs2)
+	assert.Nil(t, err)
+
+	name2 := reply.Name
+	args2 := &pb.SubscribeArgs{
+		Name:         name2,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Exclusive),
+		SubOffset:    1,
+	}
+	_, err = s.ProcessSub(context.TODO(), args2)
+	assert.Equal(t, "there is a suber in existing subcription", err.Error())
+
+	newSubers, err := rc.ZkCli.HowManySubers(topic, partition, subscription)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, newSubers)
+}
+
+func TestSMode_Failover_Timeout(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestSMode_Failover_Timeout"
+	partition := 1
+	subscription := "TestSMode_Failover_TimeoutSubscription"
+
+	cli1 := &Client{}
+	id1 := nrand()
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "suber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           id1,
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err := s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	name := reply.Name
+	args := &pb.SubscribeArgs{
+		Id:           id1,
+		Name:         name,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Failover),
+		SubOffset:    1,
+	}
+	_, err = s.ProcessSub(context.TODO(), args)
+	assert.Nil(t, err)
+
+	cli2 := &Client{}
+	id2 := nrand()
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "suber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           id2,
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err = s.Connect(context.TODO(), conArgs2)
+	assert.Nil(t, err)
+
+	name2 := reply.Name
+	args2 := &pb.SubscribeArgs{
+		Id:           id2,
+		Name:         name2,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Failover),
+		SubOffset:    1,
+	}
+
+	ch := make(chan bool)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*2*time.Duration(config.SrvConf.HeartBeatInterval))
+		defer cancel()
+		_, err := s.ProcessSub(ctx, args2)
+		if ok := checkTimeout(err); ok {
+			ch <- true
+		} else {
+			fmt.Println(err)
+			ch <- false
+		}
+	}()
+
+	re := <-ch
+	assert.True(t, re)
+
+	newSubers, err := rc.ZkCli.HowManySubers(topic, partition, subscription)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, newSubers)
+
+	LeadSuber, err := rc.ZkCli.GetLeadSuber(topic, partition, subscription)
+	assert.Nil(t, err)
+	assert.Equal(t, id1, LeadSuber.ID)
+}
+
+func TestSMode_Failover_Failover(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestSMode_Failover_Failover"
+	partition := 1
+	subscription := "TestSMode_Failover_FailoverSubscription"
+
+	cli1 := &Client{}
+	id1 := nrand()
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "suber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           id1,
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err := s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	name := reply.Name
+	args := &pb.SubscribeArgs{
+		Id:           id1,
+		Name:         name,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Failover),
+		SubOffset:    1,
+	}
+	_, err = s.ProcessSub(context.TODO(), args)
+	assert.Nil(t, err)
+
+	cli2 := &Client{}
+	id2 := nrand()
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "suber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           id2,
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err = s.Connect(context.TODO(), conArgs2)
+	assert.Nil(t, err)
+
+	name2 := reply.Name
+	args2 := &pb.SubscribeArgs{
+		Id:           id2,
+		Name:         name2,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Failover),
+		SubOffset:    1,
+	}
+
+	ch := make(chan bool)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*2*time.Duration(config.SrvConf.HeartBeatInterval))
+		defer cancel()
+		_, err := s.ProcessSub(ctx, args2)
+		if err == nil {
+			ch <- true
+		} else {
+			assert.Nil(t, err)
+			ch <- false
+		}
+	}()
+
+	time.Sleep(time.Second)
+	cli1.server.GracefulStop()
+
+	re := <-ch
+	assert.True(t, re)
+
+	newSubers, err := rc.ZkCli.HowManySubers(topic, partition, subscription)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, newSubers)
+
+	LeadSuber, err := rc.ZkCli.GetLeadSuber(topic, partition, subscription)
+	assert.Nil(t, err)
+	assert.Equal(t, id2, LeadSuber.ID)
+}
+
+func TestSMode_Shard(t *testing.T) {
+	s, err := RunServer()
+	assert.Nil(t, err)
+
+	topic := "TestSMode_Exclusive"
+	partition := 1
+	subscription := "TestSMode_ExclusiveSubscription"
+
+	cli1 := &Client{}
+	id1 := nrand()
+	err = cli1.connect(7777)
+	assert.Nil(t, err)
+
+	conArgs1 := &pb.ConnectArgs{
+		Name:         "suber1",
+		Url:          "127.0.0.1:7777",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           id1,
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err := s.Connect(context.TODO(), conArgs1)
+	assert.Nil(t, err)
+
+	name := reply.Name
+	args := &pb.SubscribeArgs{
+		Id:           id1,
+		Name:         name,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Shard),
+		SubOffset:    1,
+	}
+	_, err = s.ProcessSub(context.TODO(), args)
+	assert.Nil(t, err)
+
+	cli2 := &Client{}
+	err = cli2.connect(7778)
+	assert.Nil(t, err)
+
+	conArgs2 := &pb.ConnectArgs{
+		Name:         "suber2",
+		Url:          "127.0.0.1:7778",
+		Topic:        topic,
+		Partition:    int32(partition),
+		Type:         Suber,
+		Id:           nrand(),
+		PubMode:      int32(PMode_Exclusive),
+		PartitionNum: 1,
+	}
+	reply, err = s.Connect(context.TODO(), conArgs2)
+	assert.Nil(t, err)
+
+	name2 := reply.Name
+	args2 := &pb.SubscribeArgs{
+		Name:         name2,
+		Topic:        topic,
+		Partition:    int32(partition),
+		Subscription: subscription,
+		Mode:         pb.SubscribeArgs_SubMode(SMode_Shard),
+		SubOffset:    1,
+	}
+	_, err = s.ProcessSub(context.TODO(), args2)
+	assert.Nil(t, err)
+
+	newSubers, err := rc.ZkCli.HowManySubers(topic, partition, subscription)
+	assert.Nil(t, err)
+	assert.Equal(t, 2, newSubers)
 }

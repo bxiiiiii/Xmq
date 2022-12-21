@@ -26,6 +26,7 @@ var (
 	LeadPuberPath = "%v/%v/p%v/puber/leader"           // TopicRoot/TopicName/PartitionName
 	LeadSuberPath = "%v/%v/p%v/subscription/%v/leader" // TopicRoot/TopicName/PartitionName/SubcriptionName
 	PuberPath     = "%v/%v/p%v/puber/%v"
+	SuberPath     = "%v/%v/p%v/subscription/%v/%v"
 )
 
 type ZkClient struct {
@@ -85,6 +86,13 @@ type LeaderNode struct {
 }
 
 type PuberNode struct {
+	ID        int64
+	Topic     string
+	Partition int
+	Version   int32
+}
+
+type SuberNode struct {
 	ID        int64
 	Topic     string
 	Partition int
@@ -236,9 +244,19 @@ func (c *ZkClient) RegisterLeadPuberNode(topic string, partition int, id int64) 
 	return c.RegisterNode(path, data)
 }
 
-func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscription string) error {
+func (c *ZkClient) RegisterLeadSuberNode(topic string, partition int, subscription string, id int64) error {
+	suberNode := &SuberNode{
+		Topic:     topic,
+		Partition: partition,
+		ID:        id,
+	}
 	path := fmt.Sprintf(LeadSuberPath, c.ZkTopicRoot, topic, partition, subscription)
-	return c.registerTemNode(path, []byte{65})
+	data, err := json.Marshal(suberNode)
+	if err != nil {
+		return err
+	}
+
+	return c.RegisterNode(path, data)
 }
 
 func (c *ZkClient) RegisterLeadBrokernode(lNode *LeaderNode) error {
@@ -257,6 +275,21 @@ func (c *ZkClient) RegisterPuberNode(topic string, partition int, id int64) erro
 	}
 	path := fmt.Sprintf(PuberPath, c.ZkTopicRoot, topic, partition, id)
 	data, err := json.Marshal(pubNode)
+	if err != nil {
+		return err
+	}
+
+	return c.RegisterNode(path, data)
+}
+
+func (c *ZkClient) RegisterSuberNode(topic string, partition int, subscription string, id int64) error {
+	suberNode := &SuberNode{
+		Topic:     topic,
+		Partition: partition,
+		ID:        id,
+	}
+	path := fmt.Sprintf(SuberPath, c.ZkTopicRoot, topic, partition, subscription, id)
+	data, err := json.Marshal(suberNode)
 	if err != nil {
 		return err
 	}
@@ -478,6 +511,21 @@ func (c *ZkClient) GetLeadPuber(topic string, partition int) (*PuberNode, error)
 	return pubNode, nil
 }
 
+func (c *ZkClient) GetLeadSuber(topic string, partition int, subscription string) (*SuberNode, error) {
+	path := fmt.Sprintf(LeadSuberPath, c.ZkTopicRoot, topic, partition, subscription)
+	data, _, err := c.Conn.Get(path)
+	if err != nil {
+		return nil, err
+	}
+
+	suberNode := &SuberNode{}
+	if err := json.Unmarshal(data, suberNode); err != nil {
+		return nil, err
+	}
+
+	return suberNode, nil
+}
+
 func (c *ZkClient) GetAllBrokers() ([]*BrokerNode, error) {
 	var brokers []*BrokerNode
 	zNodes, _, err := c.Conn.Children(c.ZkBrokerRoot)
@@ -545,13 +593,24 @@ func (c *ZkClient) HowManyPubers(topic string, partition int) (int, error) {
 	return len(pubers), nil
 }
 
+func (c *ZkClient) HowManySubers(topic string, partition int, subscription string) (int, error) {
+	path := fmt.Sprintf("%v/%v/p%v/subscription/%v", c.ZkTopicRoot, topic, partition, subscription)
+	pubers, _, err := c.Conn.Children(path)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(pubers), nil
+}
+
 func (c *ZkClient) IsSubersExists(topic string, partition int, subscription string) (bool, error) {
-	path := fmt.Sprintf(SnodePath, c.ZkTopicRoot, topic, partition, subscription)
+	path := fmt.Sprintf("%v/%v/p%v/subscription/%v", c.ZkTopicRoot, topic, partition, subscription)
 	subers, _, err := c.Conn.Children(path)
 	if err != nil {
+		logger.Errorln("IsSubersExists path: ", path)
 		return false, err
 	}
-	return len(subers) == 0, nil
+	return len(subers) != 0, nil
 }
 
 // func (c *ZkClient) getZnode(path string) (){
@@ -643,6 +702,7 @@ func (c *ZkClient) createPartitionTopic(topic string, partition int) error {
 }
 
 func (c *ZkClient) UpdatePartition(pNode *PartitionNode) error {
+	logger.Debugf("UpdatePartition: %v %v", *pNode, pNode)
 	path := fmt.Sprintf(PnodePath, c.ZkTopicRoot, pNode.TopicName, pNode.ID)
 	version := pNode.Version
 	pNode.Version++
@@ -716,4 +776,18 @@ func (c *ZkClient) DeleteLeadPuber(topic string, partition int) error {
 
 func (c *ZkClient) Close() {
 	c.Conn.Close()
+}
+
+func (c *ZkClient) DeleteLeadSuber(topic string, partition int, subscription string) error {
+	path := fmt.Sprintf(LeadSuberPath, c.ZkTopicRoot, topic, partition, subscription)
+	suberNode, err := c.GetLeadSuber(topic, partition, subscription)
+	if err != nil {
+		return err
+	}
+
+	if err := c.Conn.Delete(path, suberNode.Version); err != nil {
+		return err
+	}
+
+	return nil
 }
